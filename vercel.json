@@ -1,0 +1,13 @@
+{
+  "rewrites": [
+    { "source": "/v1/chat/completions", "destination": "/api/chat" },
+    { "source": "/v1/models", "destination": "/api/models" },
+    { "source": "/chat/completions", "destination": "/api/chat" },
+    { "source": "/models", "destination": "/api/models" }
+  ],
+  "functions": {
+    "api/chat.js": {
+      "maxDuration": 60
+    }
+  }
+}

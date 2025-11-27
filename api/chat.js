@@ -1,17 +1,14 @@
-import express from 'express';
-
-const app = express();
-app.use(express.json({ limit: '50mb' }));
-
 const BYTEZ_BASE_URL = 'https://api.bytez.com/models/v2';
 
 // Model to provider mapping
 const MODEL_CONFIG = {
+  // Anthropic models
   'claude-opus-4-5': { provider: 'anthropic', model: 'claude-opus-4-5' },
   'claude-sonnet-4': { provider: 'anthropic', model: 'claude-sonnet-4-20250514' },
   'claude-3-opus': { provider: 'anthropic', model: 'claude-3-opus-20240229' },
   'claude-3-sonnet': { provider: 'anthropic', model: 'claude-3-sonnet-20240229' },
   'claude-3-haiku': { provider: 'anthropic', model: 'claude-3-haiku-20240307' },
+  // OpenAI models
   'gpt-5': { provider: 'openai', model: 'gpt-5' },
   'gpt-5.1': { provider: 'openai', model: 'gpt-5.1' },
   'gpt-4': { provider: 'openai', model: 'gpt-4' },
@@ -25,22 +22,33 @@ const MODEL_CONFIG = {
 };
 
 function getModelConfig(requestedModel) {
-  if (MODEL_CONFIG[requestedModel]) return MODEL_CONFIG[requestedModel];
+  // Check if it's a known model
+  if (MODEL_CONFIG[requestedModel]) {
+    return MODEL_CONFIG[requestedModel];
+  }
+  // Try to detect provider from model name
   if (requestedModel.startsWith('claude') || requestedModel.startsWith('anthropic/')) {
-    return { provider: 'anthropic', model: requestedModel.replace('anthropic/', '') };
+    const model = requestedModel.replace('anthropic/', '');
+    return { provider: 'anthropic', model };
   }
   if (requestedModel.startsWith('gpt') || requestedModel.startsWith('o1') || requestedModel.startsWith('openai/')) {
-    return { provider: 'openai', model: requestedModel.replace('openai/', '') };
+    const model = requestedModel.replace('openai/', '');
+    return { provider: 'openai', model };
   }
+  // Default to openai for unknown models
   return { provider: 'openai', model: requestedModel };
 }
 
 function getApiKey(req) {
-  const authHeader = req.headers.authorization || req.headers['x-api-key'] || '';
-  return authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
+  const authHeader = req.headers?.authorization || req.headers?.['x-api-key'] || '';
+  if (authHeader.startsWith('Bearer ')) {
+    return authHeader.slice(7);
+  }
+  return authHeader || process.env.BYTEZ_API_KEY || '';
 }
 
 
+// Convert Bytez response to OpenAI format
 function toOpenAIResponse(bytezResponse, model) {
   const provider = bytezResponse.provider || {};
   const output = bytezResponse.output || {};
@@ -53,12 +61,12 @@ function toOpenAIResponse(bytezResponse, model) {
     total_tokens: usage.total_tokens || (usage.prompt_tokens || usage.input_tokens || 0) + (usage.completion_tokens || usage.output_tokens || 0),
   };
 
-  // Get content - handle both OpenAI style (choices) and Anthropic style (output.content)
+  // Get content and build proper OpenAI choices
   let content = output.content || '';
   let choices = null;
 
-  // If provider has OpenAI-style choices, use them but ensure proper format
   if (provider.choices && provider.choices.length > 0) {
+    // OpenAI style - normalize the choices
     choices = provider.choices.map((choice, idx) => ({
       index: choice.index ?? idx,
       message: {
@@ -100,7 +108,20 @@ function createStreamChunk(id, model, delta, finishReason = null) {
   };
 }
 
-app.post('/v1/chat/completions', async (req, res) => {
+export default async function handler(req, res) {
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
+    return res.status(200).end();
+  }
+
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: { message: 'Method not allowed' } });
+  }
+
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
   try {
     const { model, messages, stream } = req.body;
     const apiKey = getApiKey(req);
@@ -114,23 +135,33 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     console.log(`Request: ${model} -> ${config.provider}/${config.model}, stream=${stream}`);
 
-    if (stream) return handleStream(res, url, messages, config.model, apiKey);
+    if (stream) {
+      return handleStream(res, url, messages, config.model, apiKey);
+    }
 
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
       body: JSON.stringify({ messages }),
     });
 
     const bytezData = await response.json();
-    if (bytezData.error) return res.status(500).json({ error: { message: bytezData.error } });
 
-    res.json(toOpenAIResponse(bytezData, config.model));
+    if (bytezData.error) {
+      return res.status(response.status || 500).json({ error: { message: bytezData.error } });
+    }
+
+    const openaiResponse = toOpenAIResponse(bytezData, config.model);
+    res.json(openaiResponse);
   } catch (error) {
     console.error('Error:', error);
     res.status(500).json({ error: { message: error.message } });
   }
-});
+}
+
 
 async function handleStream(res, url, messages, model, apiKey) {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -142,12 +173,16 @@ async function handleStream(res, url, messages, model, apiKey) {
   try {
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
       body: JSON.stringify({ messages, stream: true }),
     });
 
     if (!response.ok) {
-      res.write(`data: ${JSON.stringify({ error: { message: await response.text() } })}\n\n`);
+      const error = await response.text();
+      res.write(`data: ${JSON.stringify({ error: { message: error } })}\n\n`);
       res.write('data: [DONE]\n\n');
       return res.end();
     }
@@ -155,15 +190,20 @@ async function handleStream(res, url, messages, model, apiKey) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
 
+    // Send initial role chunk
     res.write(`data: ${JSON.stringify(createStreamChunk(id, model, { role: 'assistant' }))}\n\n`);
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+
       const text = decoder.decode(value, { stream: true });
-      if (text) res.write(`data: ${JSON.stringify(createStreamChunk(id, model, { content: text }))}\n\n`);
+      if (text) {
+        res.write(`data: ${JSON.stringify(createStreamChunk(id, model, { content: text }))}\n\n`);
+      }
     }
 
+    // Send finish chunk
     res.write(`data: ${JSON.stringify(createStreamChunk(id, model, {}, 'stop'))}\n\n`);
     res.write('data: [DONE]\n\n');
     res.end();
@@ -173,15 +213,3 @@ async function handleStream(res, url, messages, model, apiKey) {
     res.end();
   }
 }
-
-app.get('/v1/models', (req, res) => {
-  res.json({
-    object: 'list',
-    data: Object.keys(MODEL_CONFIG).map(id => ({ id, object: 'model', owned_by: MODEL_CONFIG[id].provider })),
-  });
-});
-
-app.use(express.static('public'));
-
-const PORT = 6660;
-app.listen(PORT, () => console.log(`Proxy running on http://localhost:${PORT}`));

@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bytez OpenAI Proxy</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      min-height: 100vh;
+      color: #e4e4e7;
+    }
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 2rem;
+    }
+    h1 {
+      text-align: center;
+      margin-bottom: 0.5rem;
+      background: linear-gradient(90deg, #60a5fa, #a78bfa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .subtitle {
+      text-align: center;
+      color: #9ca3af;
+      margin-bottom: 2rem;
+    }
+    .card {
+      background: rgba(255,255,255,0.05);
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    .card h2 {
+      font-size: 1rem;
+      color: #60a5fa;
+      margin-bottom: 1rem;
+    }
+    .form-group { margin-bottom: 1rem; }
+    label {
+      display: block;
+      font-size: 0.875rem;
+      color: #9ca3af;
+      margin-bottom: 0.5rem;
+    }
+    input, select, textarea {
+      width: 100%;
+      padding: 0.75rem;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.2);
+      background: rgba(0,0,0,0.3);
+      color: #e4e4e7;
+      font-size: 0.875rem;
+    }
+    textarea { min-height: 100px; resize: vertical; font-family: inherit; }
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: #60a5fa;
+    }
+    .row { display: flex; gap: 1rem; }
+    .row > * { flex: 1; }
+    button {
+      background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+      color: white;
+      border: none;
+      padding: 0.75rem 1.5rem;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+      width: 100%;
+      font-size: 1rem;
+    }
+    button:hover { opacity: 0.9; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .response {
+      background: rgba(0,0,0,0.4);
+      border-radius: 8px;
+      padding: 1rem;
+      white-space: pre-wrap;
+      font-family: 'Monaco', 'Menlo', monospace;
+      font-size: 0.8rem;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+    .endpoint {
+      background: rgba(0,0,0,0.3);
+      padding: 0.5rem 1rem;
+      border-radius: 6px;
+      font-family: monospace;
+      font-size: 0.8rem;
+      margin-bottom: 0.5rem;
+    }
+    .models-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 0.5rem;
+    }
+    .model-tag {
+      background: rgba(96, 165, 250, 0.2);
+      padding: 0.4rem 0.8rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      text-align: center;
+    }
+    .model-tag.anthropic { background: rgba(167, 139, 250, 0.2); }
+    .checkbox-group {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .checkbox-group input { width: auto; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🚀 Bytez OpenAI Proxy</h1>
+    <p class="subtitle">OpenAI-compatible API for Bytez models</p>
+
+    <div class="card">
+      <h2>📡 API Endpoints</h2>
+      <div class="endpoint">POST /v1/chat/completions</div>
+      <div class="endpoint">GET /v1/models</div>
+    </div>
+
+    <div class="card">
+      <h2>🤖 Available Models</h2>
+      <div class="models-grid">
+        <div class="model-tag anthropic">claude-opus-4-5</div>
+        <div class="model-tag anthropic">claude-sonnet-4</div>
+        <div class="model-tag anthropic">claude-3-opus</div>
+        <div class="model-tag anthropic">claude-3-sonnet</div>
+        <div class="model-tag anthropic">claude-3-haiku</div>
+        <div class="model-tag">gpt-5</div>
+        <div class="model-tag">gpt-5.1</div>
+        <div class="model-tag">gpt-4</div>
+        <div class="model-tag">gpt-4-turbo</div>
+        <div class="model-tag">gpt-4o</div>
+        <div class="model-tag">gpt-4o-mini</div>
+        <div class="model-tag">o1</div>
+        <div class="model-tag">o1-mini</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>🧪 Test API</h2>
+      <div class="form-group">
+        <label>Bytez API Key</label>
+        <input type="password" id="apiKey" placeholder="Enter your Bytez API key">
+      </div>
+      <div class="row">
+        <div class="form-group">
+          <label>Model</label>
+          <select id="model">
+            <optgroup label="Anthropic">
+              <option value="claude-opus-4-5">claude-opus-4-5</option>
+              <option value="claude-sonnet-4">claude-sonnet-4</option>
+              <option value="claude-3-opus">claude-3-opus</option>
+              <option value="claude-3-haiku">claude-3-haiku</option>
+            </optgroup>
+            <optgroup label="OpenAI">
+              <option value="gpt-5">gpt-5</option>
+              <option value="gpt-5.1">gpt-5.1</option>
+              <option value="gpt-4o">gpt-4o</option>
+              <option value="gpt-4o-mini">gpt-4o-mini</option>
+              <option value="o1">o1</option>
+              <option value="o1-mini">o1-mini</option>
+            </optgroup>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="checkbox-group">
+            <input type="checkbox" id="stream"> Enable Streaming
+          </label>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Message</label>
+        <textarea id="message" placeholder="Enter your message...">Hello! Tell me a short joke.</textarea>
+      </div>
+      <button id="sendBtn" onclick="sendRequest()">Send Request</button>
+    </div>
+
+    <div class="card">
+      <h2>📤 Response</h2>
+      <div class="response" id="response">Response will appear here...</div>
+    </div>
+
+    <div class="card">
+      <h2>📋 Usage Example</h2>
+      <div class="response">curl -X POST "https://your-app.vercel.app/v1/chat/completions" \
+  -H "Authorization: Bearer YOUR_BYTEZ_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": false
+  }'</div>
+    </div>
+  </div>
+
+  <script>
+    async function sendRequest() {
+      const apiKey = document.getElementById('apiKey').value;
+      const model = document.getElementById('model').value;
+      const message = document.getElementById('message').value;
+      const stream = document.getElementById('stream').checked;
+      const responseEl = document.getElementById('response');
+      const btn = document.getElementById('sendBtn');
+
+      if (!apiKey) {
+        responseEl.textContent = 'Error: Please enter your Bytez API key';
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Sending...';
+      responseEl.textContent = '';
+
+      try {
+        const response = await fetch('/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+          },
+          body: JSON.stringify({
+            model,
+            messages: [{ role: 'user', content: message }],
+            stream
+          })
+        });
+
+        if (stream) {
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let fullContent = '';
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value);
+            const lines = chunk.split('\n');
+
+            for (const line of lines) {
+              if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                try {
+                  const data = JSON.parse(line.slice(6));
+                  if (data.choices?.[0]?.delta?.content) {
+                    fullContent += data.choices[0].delta.content;
+                    responseEl.textContent = fullContent;
+                  }
+                } catch (e) {}
+              }
+            }
+          }
+          responseEl.textContent = fullContent || 'Stream completed';
+        } else {
+          const data = await response.json();
+          responseEl.textContent = JSON.stringify(data, null, 2);
+        }
+      } catch (error) {
+        responseEl.textContent = `Error: ${error.message}`;
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Send Request';
+    }
+  </script>
+</body>
+</html>
