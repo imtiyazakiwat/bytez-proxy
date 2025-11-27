@@ -65,22 +65,57 @@ function toOpenAIResponse(bytezResponse, model) {
   let content = output.content || '';
   let choices = null;
 
+  // If provider has OpenAI-style choices, use them and preserve tool_calls
   if (provider.choices && provider.choices.length > 0) {
-    // OpenAI style - normalize the choices
-    choices = provider.choices.map((choice, idx) => ({
-      index: choice.index ?? idx,
-      message: {
+    choices = provider.choices.map((choice, idx) => {
+      const message = {
         role: choice.message?.role || 'assistant',
         content: choice.message?.content || '',
-      },
-      finish_reason: choice.finish_reason || 'stop',
-    }));
+      };
+      // Preserve tool_calls if present
+      if (choice.message?.tool_calls && choice.message.tool_calls.length > 0) {
+        message.tool_calls = choice.message.tool_calls;
+      }
+      return {
+        index: choice.index ?? idx,
+        message,
+        finish_reason: choice.finish_reason || 'stop',
+      };
+    });
   } else {
-    // Anthropic style - build OpenAI choices from output
+    // Anthropic style - check for tool_use blocks and convert to OpenAI format
+    const toolCalls = [];
+    let textContent = '';
+    
+    // Handle Anthropic's content array format
+    if (Array.isArray(output.content)) {
+      for (const block of output.content) {
+        if (block.type === 'text') {
+          textContent += block.text || '';
+        } else if (block.type === 'tool_use') {
+          toolCalls.push({
+            id: block.id,
+            type: 'function',
+            function: {
+              name: block.name,
+              arguments: typeof block.input === 'string' ? block.input : JSON.stringify(block.input || {}),
+            },
+          });
+        }
+      }
+    } else {
+      textContent = output.content || '';
+    }
+
+    const message = { role: 'assistant', content: textContent || null };
+    if (toolCalls.length > 0) {
+      message.tool_calls = toolCalls;
+    }
+
     choices = [{
       index: 0,
-      message: { role: 'assistant', content },
-      finish_reason: 'stop',
+      message,
+      finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop',
     }];
   }
 
@@ -123,7 +158,7 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
 
   try {
-    const { model, messages, stream } = req.body;
+    const { model, messages, stream, tools, tool_choice, temperature, max_tokens } = req.body;
     const apiKey = getApiKey(req);
 
     if (!apiKey) {
@@ -133,10 +168,18 @@ export default async function handler(req, res) {
     const config = getModelConfig(model);
     const url = `${BYTEZ_BASE_URL}/${config.provider}/${config.model}`;
 
-    console.log(`Request: ${model} -> ${config.provider}/${config.model}, stream=${stream}`);
+    console.log(`Request: ${model} -> ${config.provider}/${config.model}, stream=${stream}, tools=${tools?.length || 0}`);
+
+    // Build request body with all relevant parameters
+    const requestBody = { messages };
+    if (tools && tools.length > 0) requestBody.tools = tools;
+    if (tool_choice) requestBody.tool_choice = tool_choice;
+    if (temperature !== undefined) requestBody.temperature = temperature;
+    if (max_tokens !== undefined) requestBody.max_tokens = max_tokens;
+    if (stream) requestBody.stream = true;
 
     if (stream) {
-      return handleStream(res, url, messages, config.model, apiKey);
+      return handleStream(res, url, requestBody, config.model, apiKey);
     }
 
     const response = await fetch(url, {
@@ -145,7 +188,7 @@ export default async function handler(req, res) {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ messages }),
+      body: JSON.stringify(requestBody),
     });
 
     const bytezData = await response.json();
@@ -163,7 +206,7 @@ export default async function handler(req, res) {
 }
 
 
-async function handleStream(res, url, messages, model, apiKey) {
+async function handleStream(res, url, requestBody, model, apiKey) {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
@@ -177,7 +220,7 @@ async function handleStream(res, url, messages, model, apiKey) {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ messages, stream: true }),
+      body: JSON.stringify(requestBody),
     });
 
     if (!response.ok) {
