@@ -7,12 +7,19 @@ import {
 } from 'lucide-react';
 import './Dashboard.css';
 
+// Admin user IDs
+const ADMIN_USER_IDS = ['7nMmX6NJHGX2mshNOeN7Zv97lrD2'];
+
+// Get API URL from env or fallback to window.location.origin
+const API_URL = import.meta.env.VITE_API_URL || window.location.origin;
+
 export default function Dashboard({ user, onSignOut }) {
   const [activeTab, setActiveTab] = useState('overview');
   const [profile, setProfile] = useState(null);
   const [models, setModels] = useState([]);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
+  const isAdmin = ADMIN_USER_IDS.includes(user.uid);
 
   useEffect(() => {
     loadData();
@@ -85,6 +92,7 @@ export default function Dashboard({ user, onSignOut }) {
           <NavItem icon={<Activity />} label="Models" active={activeTab === 'models'} onClick={() => setActiveTab('models')} />
           <NavItem icon={<Code />} label="Playground" active={activeTab === 'playground'} onClick={() => setActiveTab('playground')} />
           <NavItem icon={<BookOpen />} label="Docs" active={activeTab === 'docs'} onClick={() => setActiveTab('docs')} />
+          {isAdmin && <NavItem icon={<Settings />} label="Admin" active={activeTab === 'admin'} onClick={() => setActiveTab('admin')} />}
         </nav>
 
         <div className="sidebar-footer">
@@ -107,6 +115,7 @@ export default function Dashboard({ user, onSignOut }) {
         {activeTab === 'models' && <ModelsTab models={models} profile={profile} />}
         {activeTab === 'playground' && <PlaygroundTab profile={profile} models={models} />}
         {activeTab === 'docs' && <DocsTab profile={profile} />}
+        {activeTab === 'admin' && isAdmin && <AdminTab />}
       </main>
     </div>
   );
@@ -122,8 +131,43 @@ function NavItem({ icon, label, active, onClick }) {
 }
 
 function OverviewTab({ profile, copyApiKey, copied }) {
-  const freeRemaining = (profile?.freeRequestsLimit || 20) - (profile?.freeRequestsUsed || 0);
-  const freePercent = ((profile?.freeRequestsUsed || 0) / (profile?.freeRequestsLimit || 20)) * 100;
+  const [usage, setUsage] = useState(null);
+  const [loadingUsage, setLoadingUsage] = useState(true);
+  const [usageError, setUsageError] = useState(null);
+
+  useEffect(() => {
+    loadUsage();
+  }, []);
+
+  const loadUsage = async () => {
+    try {
+      const token = await auth.currentUser.getIdToken();
+      const res = await fetch('/api/usage', { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      if (data.error) {
+        setUsageError(data.error);
+      } else {
+        setUsage(data);
+      }
+    } catch (error) {
+      console.error('Failed to load usage:', error);
+      setUsageError(error.message);
+    } finally {
+      setLoadingUsage(false);
+    }
+  };
+
+  // Use dailyRequestsUsed for daily limit tracking (15/day for free users)
+  const dailyLimit = 15;
+  const dailyUsed = usage?.dailyRequestsUsed || profile?.dailyRequestsUsed || 0;
+  const dailyRemaining = Math.max(0, dailyLimit - dailyUsed);
+  const dailyPercent = (dailyUsed / dailyLimit) * 100;
+
+  const formatNumber = (num) => {
+    if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+    if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+    return num?.toString() || '0';
+  };
 
   return (
     <div className="tab-content">
@@ -133,12 +177,14 @@ function OverviewTab({ profile, copyApiKey, copied }) {
         <div className="stat-card">
           <div className="stat-icon"><Zap /></div>
           <div className="stat-info">
-            <span className="stat-value">{freeRemaining}</span>
-            <span className="stat-label">Free Requests Left</span>
+            <span className="stat-value">{profile?.puterKeysCount > 0 ? '∞' : dailyRemaining}</span>
+            <span className="stat-label">{profile?.puterKeysCount > 0 ? 'Unlimited (Own Keys)' : `Daily Requests Left (${dailyUsed}/${dailyLimit})`}</span>
           </div>
-          <div className="stat-progress">
-            <div className="progress-bar" style={{ width: `${freePercent}%` }} />
-          </div>
+          {!profile?.puterKeysCount && (
+            <div className="stat-progress">
+              <div className="progress-bar" style={{ width: `${dailyPercent}%` }} />
+            </div>
+          )}
         </div>
         
         <div className="stat-card">
@@ -160,7 +206,68 @@ function OverviewTab({ profile, copyApiKey, copied }) {
             <span className="stat-label">Claude Access</span>
           </div>
         </div>
+
+        <div className="stat-card">
+          <div className="stat-icon"><BarChart3 /></div>
+          <div className="stat-info">
+            <span className="stat-value">{formatNumber(usage?.lifetimeTotals?.totalTokens || profile?.totalTokens || 0)}</span>
+            <span className="stat-label">Total Tokens Used</span>
+          </div>
+        </div>
       </div>
+
+      {/* Token Usage Stats */}
+      <div className="card">
+        <h3>Usage Statistics</h3>
+        {loadingUsage ? (
+          <p className="card-desc">Loading usage data...</p>
+        ) : (
+          <div className="usage-stats-grid">
+            <div className="usage-stat">
+              <span className="usage-stat-value">{usage?.stats?.last24h?.requests || 0}</span>
+              <span className="usage-stat-label">Requests (24h)</span>
+            </div>
+            <div className="usage-stat">
+              <span className="usage-stat-value">{formatNumber(usage?.stats?.last24h?.tokens || 0)}</span>
+              <span className="usage-stat-label">Tokens (24h)</span>
+            </div>
+            <div className="usage-stat">
+              <span className="usage-stat-value">{usage?.stats?.last7d?.requests || 0}</span>
+              <span className="usage-stat-label">Requests (7d)</span>
+            </div>
+            <div className="usage-stat">
+              <span className="usage-stat-value">{formatNumber(usage?.stats?.last7d?.tokens || 0)}</span>
+              <span className="usage-stat-label">Tokens (7d)</span>
+            </div>
+            <div className="usage-stat">
+              <span className="usage-stat-value">{usage?.lifetimeTotals?.requests || profile?.totalRequests || 0}</span>
+              <span className="usage-stat-label">Total Requests</span>
+            </div>
+            <div className="usage-stat">
+              <span className="usage-stat-value">{formatNumber(usage?.lifetimeTotals?.totalTokens || profile?.totalTokens || 0)}</span>
+              <span className="usage-stat-label">Total Tokens</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Recent Activity */}
+      {usage?.recentLogs?.length > 0 && (
+        <div className="card">
+          <h3>Recent Activity</h3>
+          <div className="recent-logs">
+            {usage.recentLogs.slice(0, 10).map((log, i) => (
+              <div key={log.id || i} className={`log-entry ${log.success ? 'success' : 'error'}`}>
+                <div className="log-model">{log.model}</div>
+                <div className="log-tokens">
+                  {log.totalTokens > 0 ? `${formatNumber(log.totalTokens)} tokens` : log.errorMessage || 'No tokens'}
+                </div>
+                <div className="log-time">{new Date(log.timestamp).toLocaleString()}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <h3>Your API Key</h3>
@@ -176,7 +283,7 @@ function OverviewTab({ profile, copyApiKey, copied }) {
       <div className="card">
         <h3>Quick Start</h3>
         <pre className="code-block">
-{`curl -X POST "${window.location.origin}/v1/chat/completions" \\
+{`curl -X POST "${API_URL}/v1/chat/completions" \\
   -H "Authorization: Bearer ${profile?.apiKey || 'YOUR_API_KEY'}" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -190,13 +297,18 @@ function OverviewTab({ profile, copyApiKey, copied }) {
 }
 
 function KeysTab({ profile, setProfile, copyApiKey, copied, regenerateKey }) {
-  const [showAddKey, setShowAddKey] = useState(null);
+  const [showAddKey, setShowAddKey] = useState(false);
   const [newKey, setNewKey] = useState('');
   const [saving, setSaving] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+  const [error, setError] = useState(null);
 
-  const addKey = async (provider) => {
+  // Auto-test and add key
+  const addKey = async () => {
     if (!newKey.trim()) return;
     setSaving(true);
+    setError(null);
+    setTestResult({ testing: true, message: 'Testing key...' });
     
     try {
       const token = await auth.currentUser.getIdToken();
@@ -206,25 +318,66 @@ function KeysTab({ profile, setProfile, copyApiKey, copied, regenerateKey }) {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ action: 'addKey', provider, key: newKey.trim() })
+        body: JSON.stringify({ action: 'addKey', provider: 'puter', key: newKey.trim() })
       });
       
-      if (res.ok) {
-        const field = provider === 'bytez' ? 'bytezKeysCount' : 'puterKeysCount';
-        const unlimitedField = provider === 'bytez' ? 'hasUnlimitedOpenAI' : 'hasClaudeAccess';
-        setProfile(prev => ({ 
-          ...prev, 
-          [field]: (prev[field] || 0) + 1,
-          [unlimitedField]: true
-        }));
+      const data = await res.json();
+      if (data.error) {
+        setTestResult({ valid: false, message: data.error });
+        setError(data.error);
+      } else {
+        setTestResult({ valid: true, message: 'Key added successfully!' });
+        // Reload profile to get updated keys list
+        const profileRes = await fetch('/api/auth', { headers: { Authorization: `Bearer ${token}` } });
+        const profileData = await profileRes.json();
+        setProfile(profileData);
         setNewKey('');
-        setShowAddKey(null);
+        setTimeout(() => {
+          setShowAddKey(false);
+          setTestResult(null);
+        }, 1500);
       }
-    } catch (error) {
-      console.error('Add key error:', error);
+    } catch (err) {
+      setTestResult({ valid: false, message: err.message });
+      setError(err.message);
     } finally {
       setSaving(false);
     }
+  };
+
+  const removeKey = async (keyIndex) => {
+    if (!confirm('Remove this Puter key?')) return;
+    
+    try {
+      const token = await auth.currentUser.getIdToken();
+      const res = await fetch('/api/auth', {
+        method: 'POST',
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ action: 'removeKey', keyIndex })
+      });
+      
+      const data = await res.json();
+      if (data.error) {
+        setError(data.error);
+      } else {
+        // Reload profile
+        const profileRes = await fetch('/api/auth', { headers: { Authorization: `Bearer ${token}` } });
+        const profileData = await profileRes.json();
+        setProfile(profileData);
+      }
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const resetForm = () => {
+    setShowAddKey(false);
+    setNewKey('');
+    setTestResult(null);
+    setError(null);
   };
 
   return (
@@ -253,75 +406,66 @@ function KeysTab({ profile, setProfile, copyApiKey, copied, regenerateKey }) {
       <div className="card">
         <div className="card-header">
           <div>
-            <h3>Bytez API Keys</h3>
-            <p className="card-desc">Add your Bytez keys for unlimited OpenAI model access</p>
-          </div>
-          <button className="btn btn-primary" onClick={() => setShowAddKey('bytez')}>
-            <Plus size={16} />
-            Add Key
-          </button>
-        </div>
-        
-        {showAddKey === 'bytez' && (
-          <div className="add-key-form">
-            <input 
-              type="password" 
-              placeholder="Enter your Bytez API key"
-              value={newKey}
-              onChange={(e) => setNewKey(e.target.value)}
-            />
-            <button className="btn btn-primary" onClick={() => addKey('bytez')} disabled={saving}>
-              {saving ? 'Adding...' : 'Add'}
-            </button>
-            <button className="btn btn-secondary" onClick={() => { setShowAddKey(null); setNewKey(''); }}>
-              Cancel
-            </button>
-          </div>
-        )}
-        
-        <div className="keys-status">
-          <span className={`status-badge ${profile?.bytezKeysCount > 0 ? 'active' : ''}`}>
-            {profile?.bytezKeysCount || 0} keys added
-          </span>
-          {profile?.hasUnlimitedOpenAI && <span className="status-badge active">Unlimited Access</span>}
-        </div>
-      </div>
-
-      <div className="card">
-        <div className="card-header">
-          <div>
             <h3>Puter API Keys</h3>
-            <p className="card-desc">Add your Puter keys to access Claude models</p>
+            <p className="card-desc">Add your own Puter keys for unlimited access to all models</p>
           </div>
-          <button className="btn btn-primary" onClick={() => setShowAddKey('puter')}>
+          <button className="btn btn-primary" onClick={() => setShowAddKey(true)}>
             <Plus size={16} />
             Add Key
           </button>
         </div>
         
-        {showAddKey === 'puter' && (
-          <div className="add-key-form">
-            <input 
-              type="password" 
-              placeholder="Enter your Puter API key"
-              value={newKey}
-              onChange={(e) => setNewKey(e.target.value)}
-            />
-            <button className="btn btn-primary" onClick={() => addKey('puter')} disabled={saving}>
-              {saving ? 'Adding...' : 'Add'}
-            </button>
-            <button className="btn btn-secondary" onClick={() => { setShowAddKey(null); setNewKey(''); }}>
-              Cancel
-            </button>
+        {showAddKey && (
+          <div className="add-key-section">
+            <div className="add-key-form">
+              <input 
+                type="password" 
+                placeholder="Enter your Puter API key"
+                value={newKey}
+                onChange={(e) => { setNewKey(e.target.value); setTestResult(null); setError(null); }}
+                disabled={saving}
+              />
+              <button className="btn btn-primary" onClick={addKey} disabled={saving || !newKey.trim()}>
+                {saving ? 'Testing & Adding...' : 'Add Key'}
+              </button>
+              <button className="btn btn-secondary" onClick={resetForm} disabled={saving}>
+                Cancel
+              </button>
+            </div>
+            {testResult && (
+              <div className={`test-result ${testResult.testing ? 'testing' : (testResult.valid ? (testResult.warning ? 'warning' : 'success') : 'error')}`}>
+                {testResult.testing ? <RefreshCw size={16} className="spin" /> : (testResult.valid ? <Check size={16} /> : <X size={16} />)}
+                <span>{testResult.message}</span>
+              </div>
+            )}
           </div>
         )}
         
-        <div className="keys-status">
+        {/* Display user's keys */}
+        {profile?.puterKeys?.length > 0 && (
+          <div className="system-keys-list" style={{ marginTop: '1rem' }}>
+            <p className="card-desc" style={{ marginBottom: '0.5rem' }}>Your added keys:</p>
+            {profile.puterKeys.map((key) => (
+              <div key={key.id} className="system-key-item">
+                <code>{key.preview}</code>
+                <button className="btn-icon" onClick={() => removeKey(key.id)} title="Remove key">
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        
+        <div className="keys-status" style={{ marginTop: '1rem' }}>
           <span className={`status-badge ${profile?.puterKeysCount > 0 ? 'active' : ''}`}>
             {profile?.puterKeysCount || 0} keys added
           </span>
-          {profile?.hasClaudeAccess && <span className="status-badge active">Claude Access Active</span>}
+          {profile?.puterKeysCount > 0 && <span className="status-badge active">Unlimited Access</span>}
         </div>
+        
+        <p className="card-desc" style={{ marginTop: '1rem' }}>
+          Get your Puter API key from <a href="https://puter.com" target="_blank" rel="noopener noreferrer">puter.com</a>
+        </p>
       </div>
     </div>
   );
@@ -561,7 +705,7 @@ function DocsTab({ profile }) {
       
       <div className="card">
         <h3>API Endpoint</h3>
-        <code className="endpoint">{window.location.origin}/v1/chat/completions</code>
+        <code className="endpoint">{API_URL}/v1/chat/completions</code>
       </div>
 
       <div className="card">
@@ -577,7 +721,7 @@ function DocsTab({ profile }) {
 
 client = OpenAI(
     api_key="${profile?.apiKey || 'YOUR_API_KEY'}",
-    base_url="${window.location.origin}/v1"
+    base_url="${API_URL}/v1"
 )
 
 response = client.chat.completions.create(
@@ -596,7 +740,7 @@ print(response.choices[0].message.content)`}
 
 const client = new OpenAI({
   apiKey: '${profile?.apiKey || 'YOUR_API_KEY'}',
-  baseURL: '${window.location.origin}/v1'
+  baseURL: '${API_URL}/v1'
 });
 
 const response = await client.chat.completions.create({
@@ -612,24 +756,209 @@ console.log(response.choices[0].message.content);`}
         <h3>Available Models</h3>
         <div className="docs-models">
           <div>
-            <h4>OpenAI (via Bytez)</h4>
+            <h4>OpenAI Models</h4>
             <ul>
               <li>gpt-5, gpt-5.1, gpt-4.1</li>
               <li>gpt-4o, gpt-4o-mini</li>
-              <li>o1, o1-mini</li>
+              <li>o1, o1-mini, o3, o3-mini</li>
             </ul>
-            <p className="note">20 free requests, then add Bytez key for unlimited</p>
           </div>
           <div>
-            <h4>Anthropic (via Puter)</h4>
+            <h4>Anthropic Models</h4>
             <ul>
               <li>claude-opus-4-5, claude-sonnet-4-5</li>
               <li>claude-sonnet-4, claude-opus-4</li>
               <li>claude-haiku-4-5, claude-3-haiku</li>
             </ul>
-            <p className="note">Requires Puter API key</p>
+          </div>
+          <div>
+            <h4>Other Models</h4>
+            <ul>
+              <li>deepseek-chat, deepseek-reasoner</li>
+              <li>mistral-large, mistral-small</li>
+              <li>gemini-*, grok-* (via OpenRouter)</li>
+            </ul>
           </div>
         </div>
+        <p className="note" style={{ marginTop: '1rem' }}>15 free requests/day. Add your own Puter key for unlimited access.</p>
+      </div>
+    </div>
+  );
+}
+
+function AdminTab() {
+  const [adminData, setAdminData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [newKey, setNewKey] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    loadAdminData();
+  }, []);
+
+  const loadAdminData = async () => {
+    try {
+      const token = await auth.currentUser.getIdToken();
+      const res = await fetch('/api/admin', { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      if (data.error) {
+        setError(data.error);
+      } else {
+        setAdminData(data);
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Auto-test and add key
+  const addSystemKey = async () => {
+    if (!newKey.trim()) return;
+    setSaving(true);
+    setError(null);
+    setTestResult({ testing: true, message: 'Testing key...' });
+    
+    try {
+      const token = await auth.currentUser.getIdToken();
+      const res = await fetch('/api/admin', {
+        method: 'POST',
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ action: 'addSystemKey', key: newKey.trim() })
+      });
+      
+      const data = await res.json();
+      if (data.error) {
+        setTestResult({ valid: false, message: data.error });
+        setError(data.error);
+      } else {
+        setTestResult({ valid: true, message: data.warning ? 'Key added (with usage limits)' : 'Key added successfully!' });
+        setNewKey('');
+        loadAdminData();
+        setTimeout(() => setTestResult(null), 2000);
+      }
+    } catch (err) {
+      setTestResult({ valid: false, message: err.message });
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removeSystemKey = async (keyIndex) => {
+    if (!confirm('Remove this system key?')) return;
+    
+    try {
+      const token = await auth.currentUser.getIdToken();
+      const res = await fetch('/api/admin', {
+        method: 'DELETE',
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ keyIndex })
+      });
+      
+      const data = await res.json();
+      if (data.error) {
+        setError(data.error);
+      } else {
+        loadAdminData();
+      }
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  if (loading) {
+    return <div className="tab-content"><p>Loading admin data...</p></div>;
+  }
+
+  if (error && !adminData) {
+    return <div className="tab-content"><p className="error">Error: {error}</p></div>;
+  }
+
+  return (
+    <div className="tab-content">
+      <h1>Admin Panel</h1>
+      
+      {error && <div className="card error-card"><p>{error}</p></div>}
+      
+      <div className="stats-grid">
+        <div className="stat-card">
+          <div className="stat-icon"><Activity /></div>
+          <div className="stat-info">
+            <span className="stat-value">{adminData?.totalUsers || 0}</span>
+            <span className="stat-label">Total Users</span>
+          </div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-icon"><Key /></div>
+          <div className="stat-info">
+            <span className="stat-value">{adminData?.systemKeysCount || 0}</span>
+            <span className="stat-label">System Puter Keys</span>
+          </div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-icon"><Zap /></div>
+          <div className="stat-info">
+            <span className="stat-value">{adminData?.dailyFreeLimit || 15}</span>
+            <span className="stat-label">Daily Free Limit</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-header">
+          <div>
+            <h3>System Puter API Keys</h3>
+            <p className="card-desc">These keys are used for free tier users. Add multiple keys for rotation.</p>
+          </div>
+        </div>
+        
+        <div className="add-key-section">
+          <div className="add-key-form">
+            <input 
+              type="password" 
+              placeholder="Enter new Puter API key"
+              value={newKey}
+              onChange={(e) => { setNewKey(e.target.value); setTestResult(null); setError(null); }}
+              disabled={saving}
+            />
+            <button className="btn btn-primary" onClick={addSystemKey} disabled={saving || !newKey.trim()}>
+              <Plus size={16} />
+              {saving ? 'Testing & Adding...' : 'Add Key'}
+            </button>
+          </div>
+          {testResult && (
+            <div className={`test-result ${testResult.testing ? 'testing' : (testResult.valid ? (testResult.warning ? 'warning' : 'success') : 'error')}`}>
+              {testResult.testing ? <RefreshCw size={16} className="spin" /> : (testResult.valid ? <Check size={16} /> : <X size={16} />)}
+              <span>{testResult.message}</span>
+            </div>
+          )}
+        </div>
+        
+        {adminData?.systemKeys?.length > 0 ? (
+          <div className="system-keys-list">
+            {adminData.systemKeys.map((key, index) => (
+              <div key={index} className="system-key-item">
+                <code>{key.preview}</code>
+                <span className="key-date">{key.addedAt ? new Date(key.addedAt).toLocaleDateString() : 'Unknown'}</span>
+                <button className="btn-icon" onClick={() => removeSystemKey(key.id)} title="Remove key">
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="card-desc">No system keys configured. Add keys to enable free tier.</p>
+        )}
       </div>
     </div>
   );

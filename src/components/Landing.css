@@ -297,6 +297,14 @@
   color: white;
 }
 
+.model-id {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-family: monospace;
+  margin-bottom: 0.75rem;
+  word-break: break-all;
+}
+
 .model-desc {
   font-size: 0.875rem;
   color: var(--text-secondary);
@@ -308,7 +316,6 @@
   gap: 1rem;
   font-size: 0.75rem;
   color: var(--text-muted);
-  margin-bottom: 0.75rem;
 }
 
 .model-caps {

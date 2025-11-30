@@ -23,6 +23,7 @@ const chatHandler = (await import('./api/chat.js')).default;
 const modelsHandler = (await import('./api/models.js')).default;
 const authHandler = (await import('./api/auth.js')).default;
 const usageHandler = (await import('./api/usage.js')).default;
+const adminHandler = (await import('./api/admin.js')).default;
 
 // API routes
 app.post('/v1/chat/completions', chatHandler);
@@ -30,6 +31,7 @@ app.get('/v1/models', modelsHandler);
 app.all('/api/auth', authHandler);
 app.all('/api/models', modelsHandler);
 app.all('/api/usage', usageHandler);
+app.all('/api/admin', adminHandler);
 
 // Serve static files
 app.use(express.static(join(__dirname, 'dist')));

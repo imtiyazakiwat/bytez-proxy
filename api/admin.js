@@ -1,7 +1,6 @@
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
+import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
-import { v4 as uuidv4 } from 'uuid';
 
 // Initialize Firebase Admin
 let db = null;
@@ -23,14 +22,12 @@ try {
   console.warn('Firebase not initialized:', e.message);
 }
 
-// Generate API key
-function generateApiKey() {
-  return `sk-${uuidv4().replace(/-/g, '')}`;
-}
+// Hardcoded admin user IDs
+const ADMIN_USER_IDS = ['7nMmX6NJHGX2mshNOeN7Zv97lrD2'];
 
 const PUTER_BASE_URL = 'https://api.puter.com/drivers/call';
 
-// Test if a Puter API key is valid
+// Test if a Puter API key is valid by making a simple request
 async function testPuterKey(key) {
   try {
     const response = await fetch(PUTER_BASE_URL, {
@@ -58,6 +55,7 @@ async function testPuterKey(key) {
       return { valid: true, message: 'Key is valid and working' };
     }
     
+    // Check for specific error types
     const errorMsg = data.error?.message || data.error || 'Unknown error';
     
     // These errors mean the key is valid but has usage limits
@@ -76,45 +74,22 @@ async function testPuterKey(key) {
   }
 }
 
-// Verify Firebase ID token
 async function verifyToken(idToken) {
   if (!auth) return null;
   try {
     return await auth.verifyIdToken(idToken);
-  } catch (error) {
+  } catch {
     return null;
   }
 }
 
-// Get or create user
-async function getOrCreateUser(uid, email) {
-  if (!db) return null;
-  const userRef = db.collection('users').doc(uid);
-  const userDoc = await userRef.get();
-  
-  if (!userDoc.exists) {
-    const apiKey = generateApiKey();
-    const userData = {
-      uid,
-      email,
-      apiKey,
-      freeRequestsUsed: 0,
-      freeRequestsLimit: 20,
-      bytezKeys: [],
-      puterKeys: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    await userRef.set(userData);
-    return userData;
-  }
-  
-  return userDoc.data();
+function isAdmin(uid) {
+  return ADMIN_USER_IDS.includes(uid);
 }
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   
   if (req.method === 'OPTIONS') return res.status(200).end();
@@ -131,57 +106,52 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: 'Invalid token' });
   }
 
-  const { uid, email } = decoded;
+  // Check if user is admin
+  if (!isAdmin(decoded.uid)) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
 
   try {
-    // GET - Get user profile
+    // GET - Get system config and admin keys
     if (req.method === 'GET') {
-      const user = await getOrCreateUser(uid, email);
-      const today = new Date().toISOString().split('T')[0];
-      // Reset daily count if it's a new day
-      const dailyUsed = user.lastRequestDate === today ? (user.dailyRequestsUsed || 0) : 0;
+      const configDoc = await db.collection('system').doc('config').get();
+      const config = configDoc.exists ? configDoc.data() : { systemPuterKeys: [] };
       
-      // Mask keys for display (show first 15 and last 4 chars)
-      const maskedKeys = (user.puterKeys || []).map((key, index) => ({
+      // Get some stats
+      const usersSnapshot = await db.collection('users').get();
+      const totalUsers = usersSnapshot.size;
+      
+      // Mask keys for display (show first 20 chars only)
+      const maskedKeys = (config.systemPuterKeys || []).map((key, index) => ({
         id: index,
-        preview: key.length > 25 ? `${key.substring(0, 15)}...${key.substring(key.length - 4)}` : key.substring(0, 20) + '...',
+        preview: key.substring(0, 20) + '...',
+        addedAt: config.keyAddedDates?.[index] || 'Unknown'
       }));
-      
+
       return res.json({
-        uid: user.uid,
-        email: user.email,
-        apiKey: user.apiKey,
-        freeRequestsUsed: user.freeRequestsUsed,
-        freeRequestsLimit: user.freeRequestsLimit,
-        dailyRequestsUsed: dailyUsed,
-        dailyLimit: 15,
-        lastRequestDate: user.lastRequestDate,
-        puterKeysCount: user.puterKeys?.length || 0,
-        puterKeys: maskedKeys,
-        hasUnlimitedOpenAI: (user.puterKeys?.length || 0) > 0,
-        hasClaudeAccess: (user.puterKeys?.length || 0) > 0,
-        // Lifetime stats
-        totalRequests: user.totalRequests || 0,
-        totalTokens: user.totalTokens || 0,
-        totalPromptTokens: user.totalPromptTokens || 0,
-        totalCompletionTokens: user.totalCompletionTokens || 0,
+        isAdmin: true,
+        totalUsers,
+        systemKeysCount: config.systemPuterKeys?.length || 0,
+        systemKeys: maskedKeys,
+        dailyFreeLimit: config.dailyFreeLimit || 15,
       });
     }
 
-    // POST - Add provider key
+    // POST - Add system Puter key or update config
     if (req.method === 'POST') {
-      const { action, provider, key } = req.body;
-      const userRef = db.collection('users').doc(uid);
+      const { action, key, dailyFreeLimit } = req.body;
+      const configRef = db.collection('system').doc('config');
       
       if (action === 'testKey') {
         if (!key || !key.trim()) {
           return res.status(400).json({ error: 'Key is required' });
         }
+        
         const testResult = await testPuterKey(key.trim());
         return res.json(testResult);
       }
       
-      if (action === 'addKey') {
+      if (action === 'addSystemKey') {
         if (!key || !key.trim()) {
           return res.status(400).json({ error: 'Key is required' });
         }
@@ -192,51 +162,80 @@ export default async function handler(req, res) {
           return res.status(400).json({ error: `Invalid key: ${testResult.message}` });
         }
         
-        const field = 'puterKeys';
-        const userDoc = await userRef.get();
-        const userData = userDoc.data();
-        const keys = userData[field] || [];
+        const configDoc = await configRef.get();
+        const config = configDoc.exists ? configDoc.data() : { systemPuterKeys: [], keyAddedDates: [] };
+        const keys = config.systemPuterKeys || [];
+        const dates = config.keyAddedDates || [];
         
+        // Check if key already exists
         if (keys.includes(key.trim())) {
-          return res.status(400).json({ error: 'Key already added' });
+          return res.status(400).json({ error: 'Key already exists' });
         }
         
         keys.push(key.trim());
-        await userRef.update({ [field]: keys, updatedAt: new Date().toISOString() });
+        dates.push(new Date().toISOString());
+        
+        await configRef.set({ 
+          systemPuterKeys: keys, 
+          keyAddedDates: dates,
+          updatedAt: new Date().toISOString(),
+          updatedBy: decoded.uid
+        }, { merge: true });
         
         return res.json({ success: true, keysCount: keys.length, warning: testResult.warning });
       }
       
-      if (action === 'removeKey') {
-        const { keyIndex } = req.body;
-        if (keyIndex === undefined) {
-          return res.status(400).json({ error: 'Key index is required' });
+      if (action === 'updateConfig') {
+        const updates = { updatedAt: new Date().toISOString(), updatedBy: decoded.uid };
+        if (dailyFreeLimit !== undefined) {
+          updates.dailyFreeLimit = parseInt(dailyFreeLimit) || 15;
         }
-        
-        const userDoc = await userRef.get();
-        const userData = userDoc.data();
-        const keys = userData.puterKeys || [];
-        
-        if (keyIndex < 0 || keyIndex >= keys.length) {
-          return res.status(400).json({ error: 'Invalid key index' });
-        }
-        
-        keys.splice(keyIndex, 1);
-        await userRef.update({ puterKeys: keys, updatedAt: new Date().toISOString() });
-        
-        return res.json({ success: true, keysCount: keys.length });
+        await configRef.set(updates, { merge: true });
+        return res.json({ success: true });
       }
       
-      if (action === 'regenerateApiKey') {
-        const newApiKey = generateApiKey();
-        await userRef.update({ apiKey: newApiKey, updatedAt: new Date().toISOString() });
-        return res.json({ success: true, apiKey: newApiKey });
+      return res.status(400).json({ error: 'Invalid action' });
+    }
+
+    // DELETE - Remove system Puter key
+    if (req.method === 'DELETE') {
+      const { keyIndex } = req.body;
+      
+      if (keyIndex === undefined) {
+        return res.status(400).json({ error: 'Key index is required' });
       }
+      
+      const configRef = db.collection('system').doc('config');
+      const configDoc = await configRef.get();
+      
+      if (!configDoc.exists) {
+        return res.status(404).json({ error: 'No config found' });
+      }
+      
+      const config = configDoc.data();
+      const keys = config.systemPuterKeys || [];
+      const dates = config.keyAddedDates || [];
+      
+      if (keyIndex < 0 || keyIndex >= keys.length) {
+        return res.status(400).json({ error: 'Invalid key index' });
+      }
+      
+      keys.splice(keyIndex, 1);
+      dates.splice(keyIndex, 1);
+      
+      await configRef.set({ 
+        systemPuterKeys: keys, 
+        keyAddedDates: dates,
+        updatedAt: new Date().toISOString(),
+        updatedBy: decoded.uid
+      }, { merge: true });
+      
+      return res.json({ success: true, keysCount: keys.length });
     }
 
     return res.status(400).json({ error: 'Invalid request' });
   } catch (error) {
-    console.error('Auth error:', error);
+    console.error('Admin error:', error);
     return res.status(500).json({ error: error.message });
   }
 }

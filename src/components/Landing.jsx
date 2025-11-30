@@ -31,7 +31,7 @@ export default function Landing({ onSignIn }) {
         <div className="container hero-content">
           <div className="badge">
             <Zap size={14} />
-            <span>20 Free API Requests</span>
+            <span>15 Free Requests/Day</span>
           </div>
           <h1>One API Key.<br />All AI Models.</h1>
           <p className="hero-subtitle">
@@ -110,7 +110,7 @@ export default function Landing({ onSignIn }) {
               <h3>
                 <span className="provider-dot openai" />
                 OpenAI Models
-                <span className="provider-badge">20 Free Requests</span>
+                <span className="provider-badge">15 Free/Day</span>
               </h3>
               <div className="models-grid">
                 {models.filter(m => m.provider === 'openai').map(model => (
@@ -123,7 +123,7 @@ export default function Landing({ onSignIn }) {
               <h3>
                 <span className="provider-dot anthropic" />
                 Anthropic Models
-                <span className="provider-badge">Requires Puter Key</span>
+                <span className="provider-badge">15 Free/Day</span>
               </h3>
               <div className="models-grid">
                 {models.filter(m => m.provider === 'anthropic').map(model => (
@@ -139,7 +139,7 @@ export default function Landing({ onSignIn }) {
         <div className="container">
           <div className="cta-card">
             <h2>Ready to get started?</h2>
-            <p>Sign up now and get 20 free API requests instantly.</p>
+            <p>Sign up now and get 15 free API requests per day.</p>
             <button className="btn btn-primary btn-lg" onClick={onSignIn}>
               Create Free Account
               <ArrowRight size={18} />
@@ -162,25 +162,45 @@ function ModelCard({ model }) {
     premium: '#f59e0b',
     standard: '#6366f1',
     economy: '#22c55e',
+    free: '#22c55e',
   };
+
+  // Get display name from model id
+  const getDisplayName = (id) => {
+    if (id.startsWith('openrouter:')) {
+      return id.replace('openrouter:', '').split('/').pop();
+    }
+    if (id.startsWith('togetherai:')) {
+      return id.replace('togetherai:', '').split('/').pop();
+    }
+    return id;
+  };
+
+  // Estimate context length based on model
+  const getContextLength = (id) => {
+    if (id.includes('gpt-4o') || id.includes('gpt-5')) return 128;
+    if (id.includes('claude-3') || id.includes('claude-sonnet') || id.includes('claude-opus')) return 200;
+    if (id.includes('o1') || id.includes('o3')) return 128;
+    if (id.includes('deepseek')) return 64;
+    if (id.includes('mistral')) return 32;
+    return 32;
+  };
+
+  const displayName = getDisplayName(model.id);
+  const contextK = getContextLength(model.id);
 
   return (
     <div className="model-card">
       <div className="model-header">
-        <span className="model-name">{model.name}</span>
-        <span className="model-tier" style={{ background: tierColors[model.tier] }}>
+        <span className="model-name">{displayName}</span>
+        <span className="model-tier" style={{ background: tierColors[model.tier] || tierColors.standard }}>
           {model.tier}
         </span>
       </div>
-      <p className="model-desc">{model.description}</p>
+      <div className="model-id">{model.id}</div>
       <div className="model-meta">
-        <span>{(model.contextLength / 1000).toFixed(0)}K context</span>
-        <span>${model.pricing?.input}/M in</span>
-      </div>
-      <div className="model-caps">
-        {model.capabilities?.map(cap => (
-          <span key={cap} className="cap-tag">{cap}</span>
-        ))}
+        <span>{contextK}K context</span>
+        <span>via {model.via}</span>
       </div>
     </div>
   );
