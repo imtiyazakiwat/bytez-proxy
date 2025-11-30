@@ -1,14 +1,22 @@
 {
+  "version": 2,
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
   "rewrites": [
     { "source": "/v1/chat/completions", "destination": "/api/chat" },
     { "source": "/v1/models", "destination": "/api/models" },
-    { "source": "/chat/completions", "destination": "/api/chat" },
-    { "source": "/models", "destination": "/api/models" },
-    { "source": "/", "destination": "/index.html" }
+    { "source": "/api/auth", "destination": "/api/auth" },
+    { "source": "/api/models", "destination": "/api/models" },
+    { "source": "/api/usage", "destination": "/api/usage" }
   ],
-  "functions": {
-    "api/chat.js": {
-      "maxDuration": 60
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Origin", "value": "*" },
+        { "key": "Access-Control-Allow-Methods", "value": "GET, POST, PUT, DELETE, OPTIONS" },
+        { "key": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization, X-API-Key" }
+      ]
     }
-  }
+  ]
 }

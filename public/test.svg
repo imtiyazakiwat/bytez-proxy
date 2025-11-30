@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <!-- Panda Body -->
+  <ellipse cx="100" cy="160" rx="45" ry="35" fill="#ffffff" stroke="#000" stroke-width="2"/>
+  
+  <!-- Panda Head -->
+  <circle cx="100" cy="90" r="50" fill="#ffffff" stroke="#000" stroke-width="2"/>
+  
+  <!-- Ears -->
+  <circle cx="60" cy="50" r="18" fill="#000"/>
+  <circle cx="140" cy="50" r="18" fill="#000"/>
+  
+  <!-- Eye Patches -->
+  <ellipse cx="75" cy="85" rx="15" ry="18" fill="#000"/>
+  <ellipse cx="125" cy="85" rx="15" ry="18" fill="#000"/>
+  
+  <!-- Eyes -->
+  <circle cx="75" cy="85" r="6" fill="#ffffff"/>
+  <circle cx="125" cy="85" r="6" fill="#ffffff"/>
+  <circle cx="77" cy="84" r="3" fill="#000"/>
+  <circle cx="127" cy="84" r="3" fill="#000"/>
+  
+  <!-- Nose -->
+  <ellipse cx="100" cy="105" rx="8" ry="5" fill="#000"/>
+  
+  <!-- Mouth (open, eating) -->
+  <path d="M90 115 Q100 125 110 115" fill="none" stroke="#000" stroke-width="2"/>
+  
+  <!-- Panda Arms -->
+  <ellipse cx="55" cy="140" rx="12" ry="20" fill="#000"/>
+  <ellipse cx="145" cy="140" rx="12" ry="20" fill="#000"/>
+  
+  <!-- Paws holding burger -->
+  <circle cx="55" cy="125" r="10" fill="#000"/>
+  <circle cx="145" cy="125" r="10" fill="#000"/>
+  
+  <!-- Burger - Top Bun -->
+  <path d="M50 130 Q100 110 150 130 L145 140 Q100 125 55 140 Z" fill="#D2691E"/>
+  <ellipse cx="100" cy="135" rx="48" ry="8" fill="#D2691E"/>
+  
+  <!-- Sesame Seeds -->
+  <ellipse cx="80" cy="125" rx="3" ry="2" fill="#FFF8DC"/>
+  <ellipse cx="100" cy="122" rx="3" ry="2" fill="#FFF8DC"/>
+  <ellipse cx="120" cy="125" rx="3" ry="2" fill="#FFF8DC"/>
+  
+  <!-- Lettuce -->
+  <path d="M50 143 Q60 148 70 142 Q80 148 90 142 Q100 148 110 142 Q120 148 130 142 Q140 148 150 143 L150 147 Q140 152 130 146 Q120 152 110 146 Q100 152 90 146 Q80 152 70 146 Q60 152 50 147 Z" fill="#32CD32"/>
+  
+  <!-- Cheese -->
+  <polygon points="48,147 55,155 152,147 145,155" fill="#FFD700"/>
+  
+  <!-- Patty -->
+  <ellipse cx="100" cy="155" rx="48" ry="8" fill="#8B4513"/>
+  
+  <!-- Bottom Bun -->
+  <ellipse cx="100" cy="165" rx="48" ry="10" fill="#D2691E"/>
+</svg>
