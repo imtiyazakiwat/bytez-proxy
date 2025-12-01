@@ -16,15 +16,114 @@ const FREE_DAILY_LIMIT = 15;
 
 import { createHash } from 'crypto';
 
-// Track failed keys to avoid using them temporarily (in-memory cache)
-const failedKeys = new Map(); // key -> timestamp of failure
-const KEY_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes cooldown for failed keys
-const dailyFailedKeysCache = new Map(); // key -> date string (for daily tracking)
+// ============== O(1) Key Pool Manager ==============
+// Instead of checking each key, maintain a ready pool of available keys
+// and a blocked set for failed keys. All operations are O(1).
 
-// Create a unique hash for a key (since JWT tokens share the same prefix)
-function hashKey(key) {
-  return createHash('sha256').update(key).digest('hex').substring(0, 16);
+class KeyPoolManager {
+  constructor() {
+    this.blockedKeys = new Map(); // hash -> { until: timestamp, reason: string }
+    this.dailyBlockedHashes = new Set(); // hashes blocked for the day
+    this.currentDate = null;
+    this.dbCacheLoaded = false;
+    this.SHORT_COOLDOWN_MS = 5 * 60 * 1000; // 5 min for temp failures
+  }
+
+  // O(1) hash computation (cached per key instance via Map)
+  hashKey(key) {
+    return createHash('sha256').update(key).digest('hex').substring(0, 16);
+  }
+
+  // Reset daily blocks at midnight
+  checkDateReset() {
+    const today = new Date().toISOString().split('T')[0];
+    if (this.currentDate !== today) {
+      this.dailyBlockedHashes.clear();
+      this.currentDate = today;
+      this.dbCacheLoaded = false;
+    }
+  }
+
+  // O(1) - Mark key as temporarily failed (short cooldown)
+  markTempFailed(key) {
+    const hash = this.hashKey(key);
+    this.blockedKeys.set(hash, {
+      until: Date.now() + this.SHORT_COOLDOWN_MS,
+      reason: 'temp'
+    });
+    console.log(`[KeyPool] Temp blocked: ${hash} for ${this.SHORT_COOLDOWN_MS/1000}s`);
+  }
+
+  // O(1) - Mark key as usage-limited for the day
+  async markDailyLimited(key) {
+    this.checkDateReset();
+    const hash = this.hashKey(key);
+    this.dailyBlockedHashes.add(hash);
+    console.log(`[KeyPool] Daily blocked: ${hash}`);
+
+    // Persist to DB (fire and forget for speed)
+    if (db) {
+      const today = new Date().toISOString().split('T')[0];
+      db.collection('failed_keys').doc(today).set({
+        [hash]: { failedAt: new Date().toISOString(), reason: 'usage-limited' }
+      }, { merge: true }).catch(e => console.error('DB persist error:', e.message));
+    }
+  }
+
+  // O(1) - Check if a specific key is available
+  isKeyAvailable(key) {
+    this.checkDateReset();
+    const hash = this.hashKey(key);
+
+    // Check daily block
+    if (this.dailyBlockedHashes.has(hash)) return false;
+
+    // Check temp block
+    const block = this.blockedKeys.get(hash);
+    if (block) {
+      if (Date.now() < block.until) return false;
+      this.blockedKeys.delete(hash); // Expired, remove
+    }
+
+    return true;
+  }
+
+  // O(1) amortized - Get first available key from array (uses index rotation)
+  getAvailableKey(keys, startIndex = 0) {
+    if (!keys || keys.length === 0) return null;
+    
+    // Try from startIndex, wrap around once
+    for (let i = 0; i < keys.length; i++) {
+      const idx = (startIndex + i) % keys.length;
+      if (this.isKeyAvailable(keys[idx])) {
+        return { key: keys[idx], index: idx };
+      }
+    }
+    return null;
+  }
+
+  // Load daily blocked keys from DB (called once per day per server instance)
+  async loadDailyBlockedFromDB() {
+    if (this.dbCacheLoaded || !db) return;
+    
+    this.checkDateReset();
+    const today = new Date().toISOString().split('T')[0];
+    
+    try {
+      const doc = await db.collection('failed_keys').doc(today).get();
+      if (doc.exists) {
+        const data = doc.data();
+        Object.keys(data).forEach(hash => this.dailyBlockedHashes.add(hash));
+        console.log(`[KeyPool] Loaded ${Object.keys(data).length} blocked keys from DB`);
+      }
+      this.dbCacheLoaded = true;
+    } catch (e) {
+      console.error('[KeyPool] Failed to load from DB:', e.message);
+    }
+  }
 }
+
+const keyPool = new KeyPoolManager();
 
 // Verified working text/chat models - route through OpenRouter for reliability
 // OpenRouter handles model availability and routing automatically
@@ -181,93 +280,13 @@ function getAvailableKeys(keys) {
   });
 }
 
-// Mark a key as failed (in-memory for short cooldown)
+// Wrapper functions using the O(1) KeyPoolManager
 function markKeyFailed(key) {
-  failedKeys.set(key, Date.now());
-  console.log(`Marked key as failed (cooldown ${KEY_COOLDOWN_MS/1000}s): ${key.substring(0, 10)}...`);
+  keyPool.markTempFailed(key);
 }
 
-// Mark a key as usage-limited for the day (persisted to DB)
 async function markKeyUsageLimited(key) {
-  const today = new Date().toISOString().split('T')[0];
-  const keyHash = hashKey(key); // Use proper hash since JWT tokens share prefix
-  
-  // Update in-memory cache
-  dailyFailedKeysCache.set(key, today);
-  
-  // Persist to Firestore
-  if (db) {
-    try {
-      const docRef = db.collection('failed_keys').doc(today);
-      await docRef.set({
-        [keyHash]: {
-          failedAt: new Date().toISOString(),
-          reason: 'usage-limited'
-        }
-      }, { merge: true });
-      console.log(`Marked key as usage-limited for ${today}: ${keyHash}`);
-    } catch (error) {
-      console.error('Failed to persist usage-limited key:', error.message);
-    }
-  }
-}
-
-// Check if a key is usage-limited for today
-async function isKeyUsageLimited(key) {
-  const today = new Date().toISOString().split('T')[0];
-  
-  // Check in-memory cache first
-  const cachedDate = dailyFailedKeysCache.get(key);
-  if (cachedDate === today) return true;
-  if (cachedDate && cachedDate !== today) {
-    // Clear stale cache entry
-    dailyFailedKeysCache.delete(key);
-  }
-  
-  // Check Firestore
-  if (db) {
-    try {
-      const keyHash = hashKey(key); // Use proper hash
-      const docRef = db.collection('failed_keys').doc(today);
-      const doc = await docRef.get();
-      if (doc.exists && doc.data()[keyHash]) {
-        dailyFailedKeysCache.set(key, today); // Update cache
-        return true;
-      }
-    } catch (error) {
-      console.error('Failed to check usage-limited key:', error.message);
-    }
-  }
-  
-  return false;
-}
-
-// Get available keys (excluding failed and usage-limited ones)
-async function getAvailableKeysAsync(keys) {
-  if (!keys || keys.length === 0) return [];
-  const now = Date.now();
-  const available = [];
-  
-  for (const key of keys) {
-    // Check short-term cooldown
-    const failedAt = failedKeys.get(key);
-    if (failedAt && now - failedAt <= KEY_COOLDOWN_MS) {
-      continue;
-    }
-    if (failedAt) {
-      failedKeys.delete(key);
-    }
-    
-    // Check daily usage limit
-    const isLimited = await isKeyUsageLimited(key);
-    if (isLimited) {
-      continue;
-    }
-    
-    available.push(key);
-  }
-  
-  return available;
+  await keyPool.markDailyLimited(key);
 }
 
 
@@ -482,46 +501,50 @@ async function callPuterStream(messages, modelId, puterToken, options = {}, onCh
   }
 }
 
-// Call Puter with key rotation on rate limit errors
+// Call Puter with key rotation on rate limit errors - O(1) for successful requests
 async function callPuterWithRotation(messages, modelId, userKeys, systemKeys, options = {}) {
   // User keys take priority, then system keys
   const allKeys = userKeys && userKeys.length > 0 ? [...userKeys] : [...(systemKeys || [])];
+  if (allKeys.length === 0) {
+    throw new Error('No API keys configured');
+  }
+
+  // Load daily blocked keys from DB once per day (amortized O(1))
+  await keyPool.loadDailyBlockedFromDB();
+
   let lastError = null;
   let usedKey = null;
+  let startIndex = 0;
   
-  // Try each available key
+  // O(1) per attempt - just get next available key
   for (let attempt = 0; attempt < allKeys.length; attempt++) {
-    const availableKeys = await getAvailableKeysAsync(allKeys);
-    if (availableKeys.length === 0) {
+    const result = keyPool.getAvailableKey(allKeys, startIndex);
+    if (!result) {
       throw new Error('All API keys are temporarily unavailable due to rate limits. Please try again later.');
     }
     
-    // Pick a key (rotate based on attempt number)
-    usedKey = availableKeys[attempt % availableKeys.length];
+    usedKey = result.key;
+    startIndex = result.index + 1; // Start from next key on retry
     
     try {
-      console.log(`Attempt ${attempt + 1}: Using key ${usedKey.substring(0, 10)}...`);
-      const result = await callPuter(messages, modelId, usedKey, options);
-      return { result, usedKey };
+      console.log(`[O(1)] Attempt ${attempt + 1}: Using key index ${result.index}`);
+      const apiResult = await callPuter(messages, modelId, usedKey, options);
+      return { result: apiResult, usedKey };
     } catch (error) {
       lastError = error;
-      console.error(`Key ${usedKey.substring(0, 10)}... failed:`, error.message);
+      console.error(`Key index ${result.index} failed:`, error.message);
       
       if (error.isRateLimit) {
         markKeyFailed(usedKey);
-        // If it's a usage-limited error, mark for the whole day
         if (isUsageLimitedError(error.message)) {
           await markKeyUsageLimited(usedKey);
         }
-        // Continue to try next key
         continue;
       }
-      // Non-rate-limit error, don't try other keys
       throw error;
     }
   }
   
-  // All keys failed
   throw lastError || new Error('All API keys failed');
 }
 
@@ -828,6 +851,16 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
   // Get the keys to use - user keys take priority
   const hasUserKeys = userKeys && userKeys.length > 0;
   const allKeys = hasUserKeys ? [...userKeys] : [...(systemKeys || [])];
+  
+  if (allKeys.length === 0) {
+    res.write(`data: ${JSON.stringify({ error: { message: 'No API keys configured' } })}\n\n`);
+    res.end();
+    return;
+  }
+
+  // Load daily blocked keys from DB once per day (amortized O(1))
+  await keyPool.loadDailyBlockedFromDB();
+
   console.log(`[Stream] User has ${userKeys?.length || 0} personal keys, ${systemKeys?.length || 0} system keys. Using: ${hasUserKeys ? 'USER' : 'SYSTEM'} keys`);
 
   let totalContent = '';
@@ -835,18 +868,20 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
   let lastError = null;
   let usedKey = null;
   let success = false;
+  let startIndex = 0;
 
-  // Try each available key until one works (key rotation)
+  // O(1) per attempt - just get next available key
   for (let attempt = 0; attempt < allKeys.length && !success; attempt++) {
-    const availableKeys = await getAvailableKeysAsync(allKeys);
-    if (availableKeys.length === 0) {
+    const keyResult = keyPool.getAvailableKey(allKeys, startIndex);
+    if (!keyResult) {
       res.write(`data: ${JSON.stringify({ error: { message: 'All API keys are temporarily unavailable due to rate limits. Please try again later.' } })}\n\n`);
       res.end();
       return;
     }
     
-    usedKey = availableKeys[attempt % availableKeys.length];
-    console.log(`[Stream] Attempt ${attempt + 1}: Using key ${usedKey.substring(0, 20)}...`);
+    usedKey = keyResult.key;
+    startIndex = keyResult.index + 1;
+    console.log(`[Stream O(1)] Attempt ${attempt + 1}: Using key index ${keyResult.index}`);
 
     // Reset content for retry
     totalContent = '';
