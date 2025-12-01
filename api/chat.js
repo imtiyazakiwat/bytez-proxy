@@ -14,43 +14,47 @@ const db = getApps().length ? getFirestore() : null;
 const PUTER_BASE_URL = 'https://api.puter.com/drivers/call';
 const FREE_DAILY_LIMIT = 15;
 
-// Track failed keys to avoid using them temporarily
+import { createHash } from 'crypto';
+
+// Track failed keys to avoid using them temporarily (in-memory cache)
 const failedKeys = new Map(); // key -> timestamp of failure
 const KEY_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes cooldown for failed keys
+const dailyFailedKeysCache = new Map(); // key -> date string (for daily tracking)
 
-// Model to driver mapping - verified working models
-const MODEL_DRIVERS = {
-  // OpenAI models via openai-completion driver
-  'gpt-5.1': 'openai-completion',
-  'gpt-5': 'openai-completion',
-  'gpt-5-mini': 'openai-completion',
-  'gpt-4.1': 'openai-completion',
-  'gpt-4o': 'openai-completion',
-  'gpt-4o-mini': 'openai-completion',
-  'o3': 'openai-completion',
-  'o3-mini': 'openai-completion',
-  'o1': 'openai-completion',
-  'o1-mini': 'openai-completion',
-  // Claude models via claude driver
-  'claude-opus-4-5': { driver: 'claude', model: 'claude-opus-4-5-20251101' },
-  'claude-opus-4.5': { driver: 'claude', model: 'claude-opus-4-5-20251101' },
-  'claude-sonnet-4-5': { driver: 'claude', model: 'claude-sonnet-4-5-20250929' },
-  'claude-sonnet-4.5': { driver: 'claude', model: 'claude-sonnet-4-5-20250929' },
-  'claude-haiku-4-5': { driver: 'claude', model: 'claude-haiku-4-5-20251001' },
-  'claude-haiku-4.5': { driver: 'claude', model: 'claude-haiku-4-5-20251001' },
-  'claude-sonnet-4': { driver: 'claude', model: 'claude-sonnet-4-20250514' },
-  'claude-opus-4': { driver: 'claude', model: 'claude-opus-4-20250514' },
-  'claude-opus-4-1': { driver: 'claude', model: 'claude-opus-4-1-20250805' },
-  'claude-3-5-sonnet': { driver: 'claude', model: 'claude-3-5-sonnet-20241022' },
-  'claude-3-7-sonnet': { driver: 'claude', model: 'claude-3-7-sonnet-20250219' },
-  'claude-3-haiku': { driver: 'claude', model: 'claude-3-haiku-20240307' },
-  // DeepSeek models via deepseek driver
-  'deepseek-chat': 'deepseek',
-  'deepseek-reasoner': 'deepseek',
-  // Mistral models via mistral driver
-  'mistral-large': { driver: 'mistral', model: 'mistral-large-latest' },
-  'mistral-medium': { driver: 'mistral', model: 'mistral-medium-latest' },
-  'mistral-small': { driver: 'mistral', model: 'mistral-small-latest' },
+// Create a unique hash for a key (since JWT tokens share the same prefix)
+function hashKey(key) {
+  return createHash('sha256').update(key).digest('hex').substring(0, 16);
+}
+
+// Verified working text/chat models - route through OpenRouter for reliability
+// OpenRouter handles model availability and routing automatically
+const OPENROUTER_MODEL_MAP = {
+  // OpenAI models
+  'gpt-4.1': 'openai/gpt-4.1',
+  'gpt-4o': 'openai/gpt-4o',
+  'gpt-4o-mini': 'openai/gpt-4o-mini',
+  'o3': 'openai/o3',
+  'o3-mini': 'openai/o3-mini',
+  'o1': 'openai/o1',
+  'o1-mini': 'openai/o1-mini',
+  // Claude models
+  'claude-sonnet-4': 'anthropic/claude-sonnet-4',
+  'claude-3-5-sonnet': 'anthropic/claude-3.5-sonnet',
+  'claude-3-7-sonnet': 'anthropic/claude-3.7-sonnet',
+  'claude-3-haiku': 'anthropic/claude-3-haiku',
+  // DeepSeek models
+  'deepseek-chat': 'deepseek/deepseek-chat',
+  'deepseek-reasoner': 'deepseek/deepseek-reasoner',
+  // Mistral models
+  'mistral-large': 'mistralai/mistral-large',
+  'mistral-small': 'mistralai/mistral-small',
+  // Gemini models
+  'gemini-2.0-flash': 'google/gemini-2.0-flash-001',
+  'gemini-2.5-flash': 'google/gemini-2.5-flash-preview',
+  'gemini-pro': 'google/gemini-pro',
+  // Grok models
+  'grok-3': 'x-ai/grok-3',
+  'grok-2': 'x-ai/grok-2',
 };
 
 // Normalize content - handle array format (Claude Code) vs string format
@@ -79,47 +83,46 @@ function normalizeContent(content) {
   return String(content);
 }
 
-function getDriverAndModel(modelId, hasTools = false) {
+function getDriverAndModel(modelId) {
+  // Already prefixed with openrouter: - use as-is
   if (modelId.startsWith('openrouter:')) {
     return { driver: 'openrouter', model: modelId };
   }
+  
+  // TogetherAI models
   if (modelId.startsWith('togetherai:')) {
     return { driver: 'together-ai', model: modelId };
   }
-  if (modelId.startsWith('gemini-')) {
+  
+  // Check if we have a known mapping for this model
+  const openRouterModel = OPENROUTER_MODEL_MAP[modelId];
+  if (openRouterModel) {
+    return { driver: 'openrouter', model: `openrouter:${openRouterModel}` };
+  }
+  
+  // For unknown models, try to route through OpenRouter with smart prefix detection
+  // This handles models from the Puter models list that aren't in our map
+  if (modelId.startsWith('gpt-') || modelId.startsWith('o1') || modelId.startsWith('o3') || modelId.startsWith('o4')) {
+    return { driver: 'openrouter', model: `openrouter:openai/${modelId}` };
+  }
+  if (modelId.startsWith('claude')) {
+    return { driver: 'openrouter', model: `openrouter:anthropic/${modelId}` };
+  }
+  if (modelId.startsWith('gemini')) {
     return { driver: 'openrouter', model: `openrouter:google/${modelId}` };
   }
-  if (modelId.startsWith('grok-')) {
+  if (modelId.startsWith('grok')) {
     return { driver: 'openrouter', model: `openrouter:x-ai/${modelId}` };
   }
-  
-  const mapping = MODEL_DRIVERS[modelId];
-  
-  // If request has tools and it's a Claude model, route through OpenRouter
-  // because Puter's Claude driver may not support tool calling
-  if (hasTools && modelId.startsWith('claude')) {
-    // Map to OpenRouter model names (without date suffixes)
-    const openRouterClaudeModels = {
-      'claude-sonnet-4-5': 'anthropic/claude-sonnet-4.5',
-      'claude-sonnet-4.5': 'anthropic/claude-sonnet-4.5',
-      'claude-opus-4-5': 'anthropic/claude-opus-4.5',
-      'claude-opus-4.5': 'anthropic/claude-opus-4.5',
-      'claude-haiku-4-5': 'anthropic/claude-haiku-4.5',
-      'claude-haiku-4.5': 'anthropic/claude-haiku-4.5',
-      'claude-sonnet-4': 'anthropic/claude-sonnet-4',
-      'claude-opus-4': 'anthropic/claude-opus-4',
-      'claude-opus-4-1': 'anthropic/claude-opus-4.1',
-      'claude-3-5-sonnet': 'anthropic/claude-3.5-sonnet',
-      'claude-3-7-sonnet': 'anthropic/claude-3.7-sonnet',
-      'claude-3-haiku': 'anthropic/claude-3-haiku',
-    };
-    const orModel = openRouterClaudeModels[modelId] || 'anthropic/claude-sonnet-4.5';
-    return { driver: 'openrouter', model: `openrouter:${orModel}` };
+  if (modelId.startsWith('mistral')) {
+    return { driver: 'openrouter', model: `openrouter:mistralai/${modelId}` };
+  }
+  if (modelId.startsWith('deepseek')) {
+    return { driver: 'openrouter', model: `openrouter:deepseek/${modelId}` };
   }
   
-  if (!mapping) return { driver: 'openai-completion', model: modelId };
-  if (typeof mapping === 'string') return { driver: mapping, model: modelId };
-  return { driver: mapping.driver, model: mapping.model };
+  // Default: try OpenRouter with the model ID as-is (it may fail but gives better error)
+  return { driver: 'openrouter', model: `openrouter:${modelId}` };
 }
 
 async function getUserByApiKey(apiKey) {
@@ -178,24 +181,96 @@ function getAvailableKeys(keys) {
   });
 }
 
-// Mark a key as failed
+// Mark a key as failed (in-memory for short cooldown)
 function markKeyFailed(key) {
   failedKeys.set(key, Date.now());
   console.log(`Marked key as failed (cooldown ${KEY_COOLDOWN_MS/1000}s): ${key.substring(0, 10)}...`);
 }
 
-// Get rotating key from available keys
-function getRotatingKey(keys, requestId) {
-  const availableKeys = getAvailableKeys(keys);
-  if (availableKeys.length === 0) return null;
+// Mark a key as usage-limited for the day (persisted to DB)
+async function markKeyUsageLimited(key) {
+  const today = new Date().toISOString().split('T')[0];
+  const keyHash = hashKey(key); // Use proper hash since JWT tokens share prefix
   
-  let hash = 0;
-  for (let i = 0; i < requestId.length; i++) {
-    hash = ((hash << 5) - hash) + requestId.charCodeAt(i);
-    hash |= 0;
+  // Update in-memory cache
+  dailyFailedKeysCache.set(key, today);
+  
+  // Persist to Firestore
+  if (db) {
+    try {
+      const docRef = db.collection('failed_keys').doc(today);
+      await docRef.set({
+        [keyHash]: {
+          failedAt: new Date().toISOString(),
+          reason: 'usage-limited'
+        }
+      }, { merge: true });
+      console.log(`Marked key as usage-limited for ${today}: ${keyHash}`);
+    } catch (error) {
+      console.error('Failed to persist usage-limited key:', error.message);
+    }
   }
-  return availableKeys[Math.abs(hash) % availableKeys.length];
 }
+
+// Check if a key is usage-limited for today
+async function isKeyUsageLimited(key) {
+  const today = new Date().toISOString().split('T')[0];
+  
+  // Check in-memory cache first
+  const cachedDate = dailyFailedKeysCache.get(key);
+  if (cachedDate === today) return true;
+  if (cachedDate && cachedDate !== today) {
+    // Clear stale cache entry
+    dailyFailedKeysCache.delete(key);
+  }
+  
+  // Check Firestore
+  if (db) {
+    try {
+      const keyHash = hashKey(key); // Use proper hash
+      const docRef = db.collection('failed_keys').doc(today);
+      const doc = await docRef.get();
+      if (doc.exists && doc.data()[keyHash]) {
+        dailyFailedKeysCache.set(key, today); // Update cache
+        return true;
+      }
+    } catch (error) {
+      console.error('Failed to check usage-limited key:', error.message);
+    }
+  }
+  
+  return false;
+}
+
+// Get available keys (excluding failed and usage-limited ones)
+async function getAvailableKeysAsync(keys) {
+  if (!keys || keys.length === 0) return [];
+  const now = Date.now();
+  const available = [];
+  
+  for (const key of keys) {
+    // Check short-term cooldown
+    const failedAt = failedKeys.get(key);
+    if (failedAt && now - failedAt <= KEY_COOLDOWN_MS) {
+      continue;
+    }
+    if (failedAt) {
+      failedKeys.delete(key);
+    }
+    
+    // Check daily usage limit
+    const isLimited = await isKeyUsageLimited(key);
+    if (isLimited) {
+      continue;
+    }
+    
+    available.push(key);
+  }
+  
+  return available;
+}
+
+
 
 // Log usage to Firestore
 async function logUsage(userId, model, usage, provider, success, errorMessage = null, keyUsed = null) {
@@ -247,6 +322,14 @@ function isRateLimitError(error) {
          errorMsg.includes('429');
 }
 
+// Check if error is specifically a daily usage limit (should be blocked for the day)
+function isUsageLimitedError(errorMsg) {
+  const msg = (errorMsg || '').toLowerCase();
+  return msg.includes('usage-limited') || 
+         msg.includes('usage limit') ||
+         msg.includes('permission denied');
+}
+
 async function callPuter(messages, modelId, puterToken, options = {}) {
   const hasTools = !!(options.tools && options.tools.length > 0);
   const { driver, model } = getDriverAndModel(modelId, hasTools);
@@ -255,23 +338,12 @@ async function callPuter(messages, modelId, puterToken, options = {}) {
   if (options.temperature !== undefined) args.temperature = options.temperature;
   if (options.tools) args.tools = options.tools;
   if (options.tool_choice) args.tool_choice = options.tool_choice;
-
-  // DEBUG: Log what we're sending to Puter
-  console.log('\n========== PUTER REQUEST ==========');
-  console.log('Driver:', driver);
-  console.log('Model:', model);
-  console.log('Has Tools:', !!options.tools, options.tools ? `(${options.tools.length} tools)` : '');
-  console.log('Args keys:', Object.keys(args));
-  console.log('====================================\n');
-
-  const requestBody = {
-    interface: 'puter-chat-completion',
-    driver,
-    method: 'complete',
-    args,
-  };
   
-  console.log('FULL PUTER REQUEST BODY:', JSON.stringify(requestBody, null, 2).substring(0, 2000));
+  // Always enable reasoning - non-thinking models will ignore it,
+  // but thinking models will return reasoning_content regardless of name pattern
+  args.include_reasoning = true;
+
+  console.log(`[Puter] Non-streaming request to ${driver} with model ${model}`);
 
   const response = await fetch(PUTER_BASE_URL, {
     method: 'POST',
@@ -290,17 +362,6 @@ async function callPuter(messages, modelId, puterToken, options = {}) {
 
   const data = await response.json();
   
-  console.log('\n========== PUTER RESPONSE ==========');
-  console.log('Success:', data.success);
-  if (!data.success) {
-    console.log('Error:', JSON.stringify(data.error, null, 2));
-  } else {
-    console.log('Result keys:', Object.keys(data.result || {}));
-    console.log('Has tool_calls:', !!(data.result?.message?.tool_calls || data.result?.tool_calls || data.result?.choices?.[0]?.message?.tool_calls));
-    console.log('Full result:', JSON.stringify(data.result, null, 2).substring(0, 2000));
-  }
-  console.log('=====================================\n');
-  
   if (!data.success) {
     const errorMsg = data.error?.message || data.error || 'Puter API error';
     const error = new Error(errorMsg);
@@ -308,6 +369,117 @@ async function callPuter(messages, modelId, puterToken, options = {}) {
     throw error;
   }
   return data.result;
+}
+
+// Streaming version of callPuter - uses true streaming with readable stream
+async function callPuterStream(messages, modelId, puterToken, options = {}, onChunk) {
+  const hasTools = !!(options.tools && options.tools.length > 0);
+  const { driver, model } = getDriverAndModel(modelId, hasTools);
+  
+  const args = { messages, model, stream: true };
+  if (options.max_tokens) args.max_tokens = options.max_tokens;
+  if (options.temperature !== undefined) args.temperature = options.temperature;
+  if (options.tools) args.tools = options.tools;
+  if (options.tool_choice) args.tool_choice = options.tool_choice;
+  args.include_reasoning = true;
+
+  console.log(`[Puter] Streaming request to ${driver} with model ${model}`);
+
+  const response = await fetch(PUTER_BASE_URL, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${puterToken}`,
+      'Content-Type': 'application/json',
+      'Origin': 'https://puter.com',
+    },
+    body: JSON.stringify({
+      interface: 'puter-chat-completion',
+      driver,
+      method: 'complete',
+      args,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Puter API error: ${response.status} - ${errorText}`);
+  }
+
+  // Check content-type to determine if it's a streaming response
+  const contentType = response.headers.get('content-type') || '';
+  
+  // If it's a JSON response (non-streaming fallback), handle it
+  if (contentType.includes('application/json')) {
+    const data = await response.json();
+    if (data.success === false || data.error) {
+      throw new Error(data.error?.message || data.error || 'Puter API error');
+    }
+    // Non-streaming response - extract and send as single chunk
+    const content = extractContent(data.result || data);
+    const reasoning = extractReasoning(data.result || data);
+    if (reasoning) onChunk({ type: 'reasoning', text: reasoning });
+    if (content) onChunk({ type: 'text', text: content });
+    return;
+  }
+
+  // True streaming - read the response body as a stream
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      
+      // Process complete lines from buffer
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed === '%') continue;
+
+        try {
+          const data = JSON.parse(trimmed);
+          
+          // Check for error in stream
+          if (data.success === false || data.error) {
+            throw new Error(data.error?.message || data.error || 'Stream error');
+          }
+          
+          // Handle streaming chunks
+          if (data.type === 'text' && data.text) {
+            onChunk({ type: 'text', text: data.text });
+          } else if (data.type === 'reasoning' && (data.reasoning || data.text)) {
+            onChunk({ type: 'reasoning', text: data.reasoning || data.text });
+          }
+        } catch (parseError) {
+          // Skip non-JSON lines
+          if (parseError instanceof SyntaxError) continue;
+          throw parseError;
+        }
+      }
+    }
+
+    // Process any remaining data in buffer
+    if (buffer.trim() && buffer.trim() !== '%') {
+      try {
+        const data = JSON.parse(buffer.trim());
+        if (data.type === 'text' && data.text) {
+          onChunk({ type: 'text', text: data.text });
+        } else if (data.type === 'reasoning' && (data.reasoning || data.text)) {
+          onChunk({ type: 'reasoning', text: data.reasoning || data.text });
+        }
+      } catch (e) {
+        // Ignore parse errors for final buffer
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 // Call Puter with key rotation on rate limit errors
@@ -319,7 +491,7 @@ async function callPuterWithRotation(messages, modelId, userKeys, systemKeys, op
   
   // Try each available key
   for (let attempt = 0; attempt < allKeys.length; attempt++) {
-    const availableKeys = getAvailableKeys(allKeys);
+    const availableKeys = await getAvailableKeysAsync(allKeys);
     if (availableKeys.length === 0) {
       throw new Error('All API keys are temporarily unavailable due to rate limits. Please try again later.');
     }
@@ -337,6 +509,10 @@ async function callPuterWithRotation(messages, modelId, userKeys, systemKeys, op
       
       if (error.isRateLimit) {
         markKeyFailed(usedKey);
+        // If it's a usage-limited error, mark for the whole day
+        if (isUsageLimitedError(error.message)) {
+          await markKeyUsageLimited(usedKey);
+        }
         // Continue to try next key
         continue;
       }
@@ -365,6 +541,32 @@ function extractContent(result) {
   }
   if (typeof result === 'string') return result;
   return null;  // Return null instead of empty string for tool call compatibility
+}
+
+// Extract reasoning/thinking content from response
+function extractReasoning(result) {
+  // OpenRouter format: reasoning field in message or choices
+  const reasoning = result.message?.reasoning 
+    || result.choices?.[0]?.message?.reasoning
+    || result.reasoning;
+  
+  if (reasoning) return reasoning;
+  
+  // DeepSeek native format: reasoning_content
+  const reasoningContent = result.message?.reasoning_content 
+    || result.choices?.[0]?.message?.reasoning_content
+    || result.reasoning_content;
+  
+  if (reasoningContent) return reasoningContent;
+  
+  // Check for thinking in content (some models wrap it in <think> tags)
+  const content = extractContent(result);
+  if (content && content.includes('<think>')) {
+    const match = content.match(/<think>([\s\S]*?)<\/think>/);
+    if (match) return match[1].trim();
+  }
+  
+  return null;
 }
 
 function extractUsage(result) {
@@ -411,10 +613,16 @@ function getProvider(modelId) {
 
 function puterToOpenAI(puterResult, model) {
   const content = extractContent(puterResult);
+  const reasoning = extractReasoning(puterResult);
   const finishReason = puterResult.finish_reason || puterResult.finishReason || 'stop';
 
   // Build the assistant message
   const message = { role: 'assistant', content: content || null };
+  
+  // Add reasoning/thinking content if present (OpenAI-compatible extension)
+  if (reasoning) {
+    message.reasoning_content = reasoning;
+  }
   
   // Handle tool calls in response
   const rawToolCalls = puterResult.message?.tool_calls || 
@@ -437,7 +645,7 @@ function puterToOpenAI(puterResult, model) {
 
   const hasToolCalls = message.tool_calls && message.tool_calls.length > 0;
 
-  return {
+  const response = {
     id: `chatcmpl-${Date.now()}`,
     object: 'chat.completion',
     created: Math.floor(Date.now() / 1000),
@@ -449,6 +657,8 @@ function puterToOpenAI(puterResult, model) {
     }],
     usage: extractUsage(puterResult),
   };
+  
+  return response;
 }
 
 export default async function handler(req, res) {
@@ -614,87 +824,99 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
 
   const id = `chatcmpl-${Date.now()}`;
   const created = Math.floor(Date.now() / 1000);
+  
+  // Get the keys to use - user keys take priority
+  const hasUserKeys = userKeys && userKeys.length > 0;
+  const allKeys = hasUserKeys ? [...userKeys] : [...(systemKeys || [])];
+  console.log(`[Stream] User has ${userKeys?.length || 0} personal keys, ${systemKeys?.length || 0} system keys. Using: ${hasUserKeys ? 'USER' : 'SYSTEM'} keys`);
 
-  try {
-    const { result, usedKey } = await callPuterWithRotation(messages, model, userKeys, systemKeys, options);
-    const content = extractContent(result);
-    const usage = extractUsage(result);
-    
-    // Extract tool calls
-    const rawToolCalls = result.message?.tool_calls || 
-                         result.choices?.[0]?.message?.tool_calls ||
-                         result.tool_calls;
+  let totalContent = '';
+  let totalReasoning = '';
+  let lastError = null;
+  let usedKey = null;
+  let success = false;
 
-    // Send role chunk
-    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
-
-    if (rawToolCalls && rawToolCalls.length > 0) {
-      // Normalize and send tool calls
-      const toolCalls = rawToolCalls.map((tc, idx) => ({
-        id: tc.id || `call_${Date.now()}_${idx}`,
-        type: tc.type || 'function',
-        function: {
-          name: tc.function?.name || tc.name,
-          arguments: typeof tc.function?.arguments === 'string' 
-            ? tc.function.arguments 
-            : JSON.stringify(tc.function?.arguments || tc.arguments || {})
-        }
-      }));
-
-      // Send content if present
-      if (content) {
-        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`);
-      }
-
-      // Send tool calls - each tool call in separate chunks for streaming
-      for (let i = 0; i < toolCalls.length; i++) {
-        const tc = toolCalls[i];
-        // First chunk: tool call with index and id
-        res.write(`data: ${JSON.stringify({ 
-          id, object: 'chat.completion.chunk', created, model, 
-          choices: [{ 
-            index: 0, 
-            delta: { 
-              tool_calls: [{ index: i, id: tc.id, type: tc.type, function: { name: tc.function.name, arguments: '' } }] 
-            }, 
-            finish_reason: null 
-          }] 
-        })}\n\n`);
-        
-        // Second chunk: arguments
-        res.write(`data: ${JSON.stringify({ 
-          id, object: 'chat.completion.chunk', created, model, 
-          choices: [{ 
-            index: 0, 
-            delta: { 
-              tool_calls: [{ index: i, function: { arguments: tc.function.arguments } }] 
-            }, 
-            finish_reason: null 
-          }] 
-        })}\n\n`);
-      }
-
-      // Final chunk with finish_reason
-      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage })}\n\n`);
-    } else {
-      // No tool calls - send content normally
-      if (content) {
-        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`);
-      }
-      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage })}\n\n`);
+  // Try each available key until one works (key rotation)
+  for (let attempt = 0; attempt < allKeys.length && !success; attempt++) {
+    const availableKeys = await getAvailableKeysAsync(allKeys);
+    if (availableKeys.length === 0) {
+      res.write(`data: ${JSON.stringify({ error: { message: 'All API keys are temporarily unavailable due to rate limits. Please try again later.' } })}\n\n`);
+      res.end();
+      return;
     }
+    
+    usedKey = availableKeys[attempt % availableKeys.length];
+    console.log(`[Stream] Attempt ${attempt + 1}: Using key ${usedKey.substring(0, 20)}...`);
 
-    res.write('data: [DONE]\n\n');
-    
-    // Log successful streaming usage
-    await logUsage(user.id, model, usage, provider, true, null, userKeys.length > 0 ? usedKey : null);
-    
-    res.end();
-  } catch (error) {
+    // Reset content for retry
+    totalContent = '';
+    totalReasoning = '';
+
+    try {
+      // Only send initial role chunk on first attempt
+      if (attempt === 0) {
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+      }
+
+      // Call Puter with streaming, process chunks via callback
+      await callPuterStream(messages, model, usedKey, options, (chunk) => {
+        if (chunk.type === 'text' && chunk.text) {
+          totalContent += chunk.text;
+          res.write(`data: ${JSON.stringify({ 
+            id, object: 'chat.completion.chunk', created, model, 
+            choices: [{ index: 0, delta: { content: chunk.text }, finish_reason: null }] 
+          })}\n\n`);
+        } else if (chunk.type === 'reasoning' && chunk.text) {
+          totalReasoning += chunk.text;
+          res.write(`data: ${JSON.stringify({ 
+            id, object: 'chat.completion.chunk', created, model, 
+            choices: [{ index: 0, delta: { reasoning_content: chunk.text }, finish_reason: null }] 
+          })}\n\n`);
+        } else if (chunk.message?.content) {
+          totalContent = chunk.message.content;
+          res.write(`data: ${JSON.stringify({ 
+            id, object: 'chat.completion.chunk', created, model, 
+            choices: [{ index: 0, delta: { content: chunk.message.content }, finish_reason: null }] 
+          })}\n\n`);
+        }
+      });
+      
+      success = true;
+      
+      // Send final chunk
+      res.write(`data: ${JSON.stringify({ 
+        id, object: 'chat.completion.chunk', created, model, 
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) }
+      })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+      
+      // Log usage (approximate)
+      await logUsage(user.id, model, { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) }, provider, true, null, hasUserKeys ? usedKey : null);
+    } catch (error) {
+      lastError = error;
+      console.error(`[Stream] Key ${usedKey.substring(0, 20)}... failed:`, error.message);
+      
+      if (isRateLimitError(error.message)) {
+        markKeyFailed(usedKey);
+        // If it's a usage-limited error, mark for the whole day
+        if (isUsageLimitedError(error.message)) {
+          await markKeyUsageLimited(usedKey);
+        }
+        // Continue to try next key
+        continue;
+      }
+      // Non-rate-limit error, don't try other keys
+      break;
+    }
+  }
+
+  if (!success) {
     // Log failed streaming usage
-    await logUsage(user.id, model, null, provider, false, error.message);
+    await logUsage(user.id, model, null, provider, false, lastError?.message || 'All keys failed');
     
-    res.write(`data: ${JSON.stringify({ error: { message: error.message } })}\n\n`);
+    res.write(`data: ${JSON.stringify({ error: { message: lastError?.message || 'All API keys failed' } })}\n\n`);
     res.end();
   }
 }

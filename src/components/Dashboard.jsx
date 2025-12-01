@@ -552,38 +552,71 @@ function ModelsTab({ models, profile }) {
 }
 
 function PlaygroundTab({ profile, models }) {
-  const [model, setModel] = useState('gpt-4o');
+  // Models from API are already filtered to OpenRouter only
+  const openRouterModels = models.filter(m => m.id.startsWith('openrouter:'));
+  
+  // Default to a reliable model
+  const defaultModel = openRouterModels.find(m => m.id === 'openrouter:openai/gpt-4o')?.id 
+    || openRouterModels.find(m => m.id.includes('gpt-4o'))?.id
+    || openRouterModels[0]?.id 
+    || 'openrouter:openai/gpt-4o';
+  
+  const [model, setModel] = useState(defaultModel);
   const [message, setMessage] = useState('');
-  const [response, setResponse] = useState('');
+  const [content, setContent] = useState('');
+  const [reasoning, setReasoning] = useState('');
+  const [isThinking, setIsThinking] = useState(false);
+  const [thinkingCollapsed, setThinkingCollapsed] = useState(false);
+  const [rawJson, setRawJson] = useState('');
   const [loading, setLoading] = useState(false);
   const [stream, setStream] = useState(true);
+  const [showFullJson, setShowFullJson] = useState(false);
   const [filter, setFilter] = useState('');
 
   // Helper to get display name from model id
   const getModelName = (id) => {
     if (id.startsWith('openrouter:')) {
-      return id.replace('openrouter:', '').split('/').pop();
-    }
-    if (id.startsWith('togetherai:')) {
-      return id.replace('togetherai:', '').split('/').pop();
+      const path = id.replace('openrouter:', '');
+      const parts = path.split('/');
+      return parts.length > 1 ? `${parts[1]} (${parts[0]})` : path;
     }
     return id;
   };
 
-  // Filter models based on search
-  const filteredModels = models.filter(m => 
+  // Filter OpenRouter models based on search
+  const filteredModels = openRouterModels.filter(m => 
     !filter || m.id.toLowerCase().includes(filter.toLowerCase())
   );
 
-  // Group popular models at top
-  const popularIds = ['gpt-5.1', 'gpt-4o', 'claude-sonnet-4', 'gemini-2.5-flash', 'deepseek-chat', 'grok-3'];
-  const popularModels = models.filter(m => popularIds.includes(m.id));
-  const otherModels = filteredModels.filter(m => !popularIds.includes(m.id));
+  // Popular models - specific reliable ones (including thinking models)
+  const popularModelIds = [
+    'openrouter:openai/gpt-4o',
+    'openrouter:openai/gpt-4o-mini',
+    'openrouter:anthropic/claude-3.5-sonnet',
+    'openrouter:deepseek/deepseek-r1',
+    'openrouter:moonshotai/kimi-k2-thinking',
+    'openrouter:qwen/qwq-32b',
+    'openrouter:meta-llama/llama-3.3-70b-instruct',
+    'openrouter:deepseek/deepseek-chat',
+  ];
+  const popularModels = openRouterModels.filter(m => popularModelIds.includes(m.id));
+  const otherModels = filteredModels.filter(m => !popularModelIds.includes(m.id));
+  
+  // Auto-select first filtered model when filter changes and current model not in results
+  useEffect(() => {
+    if (filter && filteredModels.length > 0 && !filteredModels.find(m => m.id === model)) {
+      setModel(filteredModels[0].id);
+    }
+  }, [filter, filteredModels, model]);
 
   const sendRequest = async () => {
     if (!message.trim()) return;
     setLoading(true);
-    setResponse('');
+    setContent('');
+    setReasoning('');
+    setRawJson('');
+    setIsThinking(false);
+    setThinkingCollapsed(false);
 
     try {
       const res = await fetch('/v1/chat/completions', {
@@ -603,34 +636,85 @@ function PlaygroundTab({ profile, models }) {
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let fullContent = '';
+        let fullReasoning = '';
+        let allChunks = [];
+        let hasStartedContent = false;
+        let buffer = '';
 
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
 
-          const chunk = decoder.decode(value);
-          const lines = chunk.split('\n');
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || ''; // Keep incomplete line in buffer
 
           for (const line of lines) {
-            if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+            const trimmedLine = line.trim();
+            if (trimmedLine.startsWith('data: ') && trimmedLine !== 'data: [DONE]') {
               try {
-                const data = JSON.parse(line.slice(6));
-                if (data.choices?.[0]?.delta?.content) {
-                  fullContent += data.choices[0].delta.content;
-                  setResponse(fullContent);
+                const data = JSON.parse(trimmedLine.slice(6));
+                allChunks.push(data);
+                
+                // Handle error in stream
+                if (data.error) {
+                  setContent(`Error: ${data.error.message || data.error}`);
+                  setRawJson(JSON.stringify(allChunks, null, 2));
+                  return; // Exit the streaming loop
                 }
-              } catch {}
+                
+                // Handle reasoning content (thinking)
+                if (data.choices?.[0]?.delta?.reasoning_content) {
+                  fullReasoning += data.choices[0].delta.reasoning_content;
+                  setReasoning(fullReasoning);
+                  setIsThinking(true);
+                }
+                
+                // Handle main content
+                if (data.choices?.[0]?.delta?.content) {
+                  // When content starts, collapse thinking
+                  if (!hasStartedContent && fullReasoning) {
+                    setThinkingCollapsed(true);
+                    setIsThinking(false);
+                  }
+                  hasStartedContent = true;
+                  fullContent += data.choices[0].delta.content;
+                  setContent(fullContent);
+                }
+                
+                // Update raw JSON
+                setRawJson(JSON.stringify(allChunks, null, 2));
+              } catch (e) {
+                console.log('Parse error:', e, 'Line:', trimmedLine);
+              }
             }
           }
         }
+        
+        // Final state - collapse thinking if we have content
+        if (fullContent && fullReasoning) {
+          setThinkingCollapsed(true);
+          setIsThinking(false);
+        }
       } else {
         const data = await res.json();
-        setResponse(JSON.stringify(data, null, 2));
+        setRawJson(JSON.stringify(data, null, 2));
+        
+        // Extract content and reasoning
+        const respContent = data.choices?.[0]?.message?.content || '';
+        const respReasoning = data.choices?.[0]?.message?.reasoning_content;
+        
+        setContent(respContent || JSON.stringify(data, null, 2));
+        if (respReasoning) {
+          setReasoning(respReasoning);
+          setThinkingCollapsed(true); // Auto-collapse for non-stream
+        }
       }
     } catch (error) {
-      setResponse(`Error: ${error.message}`);
+      setContent(`Error: ${error.message}`);
     } finally {
       setLoading(false);
+      setIsThinking(false);
     }
   };
 
@@ -664,7 +748,7 @@ function PlaygroundTab({ profile, models }) {
                 ))}
               </optgroup>
             </select>
-            <span className="model-count">{models.length} models available</span>
+            <span className="model-count">{openRouterModels.length} OpenRouter models available</span>
           </div>
           <div className="form-group">
             <label>Message</label>
@@ -684,14 +768,50 @@ function PlaygroundTab({ profile, models }) {
             />
             <label htmlFor="stream">Stream response</label>
           </div>
+          <div className="form-group checkbox">
+            <input 
+              type="checkbox" 
+              id="showFullJson" 
+              checked={showFullJson}
+              onChange={(e) => setShowFullJson(e.target.checked)}
+            />
+            <label htmlFor="showFullJson">Show full JSON response</label>
+          </div>
           <button className="btn btn-primary" onClick={sendRequest} disabled={loading}>
             {loading ? 'Sending...' : 'Send Request'}
           </button>
         </div>
 
         <div className="card">
-          <h3>Response</h3>
-          <pre className="response-box">{response || 'Response will appear here...'}</pre>
+          <h3>Response {showFullJson ? '(Full JSON)' : ''}</h3>
+          
+          {showFullJson ? (
+            <pre className="response-box">{rawJson || 'Response will appear here...'}</pre>
+          ) : (
+            <div className="response-container">
+              {/* Thinking/Reasoning Section */}
+              {(reasoning || isThinking) && (
+                <div className={`thinking-section ${thinkingCollapsed ? 'collapsed' : ''}`}>
+                  <div 
+                    className="thinking-header" 
+                    onClick={() => setThinkingCollapsed(!thinkingCollapsed)}
+                  >
+                    <span className="thinking-icon">{isThinking ? '⏳' : '🧠'}</span>
+                    <span className="thinking-title">
+                      {isThinking ? 'Thinking...' : 'Thought process'}
+                    </span>
+                    <span className="thinking-toggle">{thinkingCollapsed ? '▶' : '▼'}</span>
+                  </div>
+                  {!thinkingCollapsed && (
+                    <pre className="thinking-content">{reasoning}</pre>
+                  )}
+                </div>
+              )}
+              
+              {/* Main Response Content */}
+              <pre className="response-box">{content || (!reasoning && !isThinking ? 'Response will appear here...' : '')}</pre>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -758,17 +878,16 @@ console.log(response.choices[0].message.content);`}
           <div>
             <h4>OpenAI Models</h4>
             <ul>
-              <li>gpt-5, gpt-5.1, gpt-4.1</li>
-              <li>gpt-4o, gpt-4o-mini</li>
+              <li>gpt-4.1, gpt-4o, gpt-4o-mini</li>
               <li>o1, o1-mini, o3, o3-mini</li>
             </ul>
           </div>
           <div>
             <h4>Anthropic Models</h4>
             <ul>
-              <li>claude-opus-4-5, claude-sonnet-4-5</li>
-              <li>claude-sonnet-4, claude-opus-4</li>
-              <li>claude-haiku-4-5, claude-3-haiku</li>
+              <li>claude-sonnet-4</li>
+              <li>claude-3-5-sonnet, claude-3-7-sonnet</li>
+              <li>claude-3-haiku</li>
             </ul>
           </div>
           <div>

@@ -3,6 +3,40 @@ let modelsCache = null;
 let cacheTime = 0;
 const CACHE_TTL = 3600000; // 1 hour
 
+// Non-chat models to exclude (code models, embedding models, image models, etc.)
+const NON_CHAT_MODEL_PATTERNS = [
+  /codex/i,           // Code completion models
+  /embed/i,           // Embedding models
+  /whisper/i,         // Audio transcription
+  /tts/i,             // Text-to-speech
+  /dall-e/i,          // Image generation
+  /-vl-/i,            // Vision-language models
+  /-vl$/i,            // Vision-language models
+  /vision/i,          // Vision-only models
+  /realtime/i,        // Realtime models
+  /audio/i,           // Audio models
+  /moderation/i,      // Content moderation
+  /guard/i,           // Safety/guard models
+  /bert/i,            // BERT models (not chat)
+  /image/i,           // Image models
+  /multimodal/i,      // Multimodal models
+];
+
+function isChatModel(modelId) {
+  // Only include openrouter: models for reliability
+  if (!modelId.startsWith('openrouter:')) {
+    return false;
+  }
+  
+  // Exclude models matching non-chat patterns
+  for (const pattern of NON_CHAT_MODEL_PATTERNS) {
+    if (pattern.test(modelId)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 async function fetchPuterModels() {
   if (modelsCache && Date.now() - cacheTime < CACHE_TTL) {
     return modelsCache;
@@ -11,7 +45,8 @@ async function fetchPuterModels() {
   try {
     const response = await fetch('https://puter.com/puterai/chat/models');
     const data = await response.json();
-    modelsCache = data.models || [];
+    // Filter to only include OpenRouter chat/text models
+    modelsCache = (data.models || []).filter(isChatModel);
     cacheTime = Date.now();
     return modelsCache;
   } catch (error) {

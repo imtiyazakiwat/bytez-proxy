@@ -854,3 +854,85 @@
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
+
+
+/* Thinking/Reasoning Section */
+.response-container {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.thinking-section {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  transition: all 0.2s ease;
+}
+
+.thinking-section.collapsed {
+  background: var(--bg-secondary);
+}
+
+.thinking-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.2s ease;
+}
+
+.thinking-header:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.thinking-icon {
+  font-size: 1rem;
+}
+
+.thinking-title {
+  flex: 1;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.thinking-toggle {
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+}
+
+.thinking-content {
+  padding: 1rem;
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  border-top: 1px solid var(--border);
+  max-height: 300px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.thinking-section.collapsed .thinking-content {
+  display: none;
+}
+
+/* Animation for thinking indicator */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.thinking-section:not(.collapsed) .thinking-icon {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.thinking-section.collapsed .thinking-icon {
+  animation: none;
+}
