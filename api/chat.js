@@ -138,8 +138,12 @@ const OPENROUTER_MODEL_MAP = {
   'o1-mini': 'openai/o1-mini',
   // Claude models
   'claude-sonnet-4': 'anthropic/claude-sonnet-4',
+  'claude-sonnet-4-5': 'anthropic/claude-sonnet-4.5',
+  'claude-sonnet-4.5': 'anthropic/claude-sonnet-4.5',
   'claude-3-5-sonnet': 'anthropic/claude-3.5-sonnet',
+  'claude-3.5-sonnet': 'anthropic/claude-3.5-sonnet',
   'claude-3-7-sonnet': 'anthropic/claude-3.7-sonnet',
+  'claude-3.7-sonnet': 'anthropic/claude-3.7-sonnet',
   'claude-3-haiku': 'anthropic/claude-3-haiku',
   // DeepSeek models
   'deepseek-chat': 'deepseek/deepseek-chat',
@@ -474,6 +478,14 @@ async function callPuterStream(messages, modelId, puterToken, options = {}, onCh
             onChunk({ type: 'text', text: data.text });
           } else if (data.type === 'reasoning' && (data.reasoning || data.text)) {
             onChunk({ type: 'reasoning', text: data.reasoning || data.text });
+          } else if (data.type === 'tool_use') {
+            // Handle tool call in stream
+            onChunk({ 
+              type: 'tool_use', 
+              id: data.id,
+              name: data.name,
+              arguments: typeof data.input === 'string' ? data.input : JSON.stringify(data.input || {})
+            });
           }
         } catch (parseError) {
           // Skip non-JSON lines
@@ -491,6 +503,13 @@ async function callPuterStream(messages, modelId, puterToken, options = {}, onCh
           onChunk({ type: 'text', text: data.text });
         } else if (data.type === 'reasoning' && (data.reasoning || data.text)) {
           onChunk({ type: 'reasoning', text: data.reasoning || data.text });
+        } else if (data.type === 'tool_use') {
+          onChunk({ 
+            type: 'tool_use', 
+            id: data.id,
+            name: data.name,
+            arguments: typeof data.input === 'string' ? data.input : JSON.stringify(data.input || {})
+          });
         }
       } catch (e) {
         // Ignore parse errors for final buffer
@@ -735,7 +754,9 @@ export default async function handler(req, res) {
       
       // Handle tool role messages (tool results)
       if (msg.role === 'tool') {
-        sanitized.content = normalizeContent(msg.content);
+        // Tool messages must have non-empty content
+        const toolContent = normalizeContent(msg.content);
+        sanitized.content = toolContent || '(empty result)';
         if (msg.tool_call_id) sanitized.tool_call_id = msg.tool_call_id;
         if (msg.name) sanitized.name = msg.name;
         return sanitized;
@@ -744,7 +765,9 @@ export default async function handler(req, res) {
       // Handle assistant messages with tool_calls
       if (msg.role === 'assistant' && msg.tool_calls) {
         sanitized.tool_calls = msg.tool_calls;
-        sanitized.content = msg.content != null ? normalizeContent(msg.content) : null;
+        // Content must be null or non-empty string for assistant messages with tool_calls
+        const normalizedContent = msg.content != null ? normalizeContent(msg.content) : null;
+        sanitized.content = normalizedContent === '' ? null : normalizedContent;
         return sanitized;
       }
       
@@ -886,6 +909,8 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
     // Reset content for retry
     totalContent = '';
     totalReasoning = '';
+    let toolCalls = [];
+    let toolCallIndex = 0;
 
     try {
       // Only send initial role chunk on first attempt
@@ -907,6 +932,22 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
             id, object: 'chat.completion.chunk', created, model, 
             choices: [{ index: 0, delta: { reasoning_content: chunk.text }, finish_reason: null }] 
           })}\n\n`);
+        } else if (chunk.type === 'tool_use') {
+          // OpenAI streaming format for tool calls
+          const toolCall = {
+            index: toolCallIndex,
+            id: chunk.id,
+            type: 'function',
+            function: { name: chunk.name, arguments: chunk.arguments }
+          };
+          toolCalls.push(toolCall);
+          
+          // Send tool call chunk in OpenAI format
+          res.write(`data: ${JSON.stringify({ 
+            id, object: 'chat.completion.chunk', created, model, 
+            choices: [{ index: 0, delta: { tool_calls: [toolCall] }, finish_reason: null }] 
+          })}\n\n`);
+          toolCallIndex++;
         } else if (chunk.message?.content) {
           totalContent = chunk.message.content;
           res.write(`data: ${JSON.stringify({ 
@@ -918,10 +959,11 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
       
       success = true;
       
-      // Send final chunk
+      // Send final chunk with appropriate finish_reason
+      const finishReason = toolCalls.length > 0 ? 'tool_calls' : 'stop';
       res.write(`data: ${JSON.stringify({ 
         id, object: 'chat.completion.chunk', created, model, 
-        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+        choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
         usage: { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) }
       })}\n\n`);
       res.write('data: [DONE]\n\n');
