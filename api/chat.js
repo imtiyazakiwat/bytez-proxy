@@ -170,14 +170,23 @@ function hasImageContent(content) {
   );
 }
 
+// Check if content array contains file attachments (PDF, Excel, etc.)
+function hasFileContent(content) {
+  if (!Array.isArray(content)) return false;
+  return content.some(part => 
+    part.type === 'file' ||
+    (part.file && (part.file.file_data || part.file.url))
+  );
+}
+
 // Normalize content - handle array format (Claude Code) vs string format
-// preserveImages: if true, keep image_url parts for vision models
-function normalizeContent(content, preserveImages = false) {
+// preserveMultimodal: if true, keep image_url and file parts for multimodal models
+function normalizeContent(content, preserveMultimodal = false) {
   if (content == null) return '';
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
-    // If preserving images and content has images, return the array as-is for vision
-    if (preserveImages && hasImageContent(content)) {
+    // If preserving multimodal content (images, files), return the array with proper formatting
+    if (preserveMultimodal && (hasImageContent(content) || hasFileContent(content))) {
       return content.map(part => {
         if (typeof part === 'string') return { type: 'text', text: part };
         if (part.type === 'text') return part;
@@ -189,6 +198,8 @@ function normalizeContent(content, preserveImages = false) {
             image_url: { url: part.url || part.source?.url || part.data }
           };
         }
+        // Preserve file attachments (PDF, Excel, etc.)
+        if (part.type === 'file') return part;
         return null;
       }).filter(Boolean);
     }
@@ -776,12 +787,16 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: { message: 'messages array is required' } });
     }
     
-    // Check if any message contains images (for vision support)
+    // Check if any message contains multimodal content (images or files)
     const hasImages = messages.some(msg => 
       Array.isArray(msg.content) && hasImageContent(msg.content)
     );
+    const hasFiles = messages.some(msg => 
+      Array.isArray(msg.content) && hasFileContent(msg.content)
+    );
+    const hasMultimodal = hasImages || hasFiles;
     
-    // Sanitize messages while preserving tool call structure and images
+    // Sanitize messages while preserving tool call structure, images, and files
     messages = messages.map(msg => {
       const sanitized = { role: msg.role || 'user' };
       
@@ -811,10 +826,10 @@ export default async function handler(req, res) {
         return sanitized;
       }
       
-      // Regular messages - normalize content, preserve images for vision models
-      // If content is array with images, preserve the multimodal format
-      if (hasImages && Array.isArray(msg.content) && hasImageContent(msg.content)) {
-        sanitized.content = normalizeContent(msg.content, true); // preserveImages = true
+      // Regular messages - normalize content, preserve multimodal content (images, files)
+      // If content is array with images or files, preserve the multimodal format
+      if (hasMultimodal && Array.isArray(msg.content) && (hasImageContent(msg.content) || hasFileContent(msg.content))) {
+        sanitized.content = normalizeContent(msg.content, true); // preserveMultimodal = true
       } else {
         sanitized.content = normalizeContent(msg.content);
       }
