@@ -3,7 +3,7 @@ import { auth } from '../firebase';
 import { 
   Key, Copy, RefreshCw, Plus, Trash2, LogOut, 
   Zap, Shield, Activity, ChevronDown, Check, X,
-  Settings, BarChart3, Code, BookOpen
+  Settings, BarChart3, Code, BookOpen, Image
 } from 'lucide-react';
 import './Dashboard.css';
 
@@ -91,6 +91,7 @@ export default function Dashboard({ user, onSignOut }) {
           <NavItem icon={<Key />} label="API Keys" active={activeTab === 'keys'} onClick={() => setActiveTab('keys')} />
           <NavItem icon={<Activity />} label="Models" active={activeTab === 'models'} onClick={() => setActiveTab('models')} />
           <NavItem icon={<Code />} label="Playground" active={activeTab === 'playground'} onClick={() => setActiveTab('playground')} />
+          <NavItem icon={<Image />} label="Images" active={activeTab === 'images'} onClick={() => setActiveTab('images')} />
           <NavItem icon={<BookOpen />} label="Docs" active={activeTab === 'docs'} onClick={() => setActiveTab('docs')} />
           {isAdmin && <NavItem icon={<Settings />} label="Admin" active={activeTab === 'admin'} onClick={() => setActiveTab('admin')} />}
         </nav>
@@ -114,6 +115,7 @@ export default function Dashboard({ user, onSignOut }) {
         {activeTab === 'keys' && <KeysTab profile={profile} setProfile={setProfile} copyApiKey={copyApiKey} copied={copied} regenerateKey={regenerateKey} />}
         {activeTab === 'models' && <ModelsTab models={models} profile={profile} />}
         {activeTab === 'playground' && <PlaygroundTab profile={profile} models={models} />}
+        {activeTab === 'images' && <ImagesTab profile={profile} />}
         {activeTab === 'docs' && <DocsTab profile={profile} />}
         {activeTab === 'admin' && isAdmin && <AdminTab />}
       </main>
@@ -818,6 +820,217 @@ function PlaygroundTab({ profile, models }) {
   );
 }
 
+function ImagesTab({ profile }) {
+  const [prompt, setPrompt] = useState('');
+  const [model, setModel] = useState('flux-schnell-free');
+  const [size, setSize] = useState('1024x1024');
+  const [loading, setLoading] = useState(false);
+  const [generatedImage, setGeneratedImage] = useState(null);
+  const [error, setError] = useState(null);
+  const [inputImage, setInputImage] = useState(null);
+  const [inputImagePreview, setInputImagePreview] = useState(null);
+  const [imageModels, setImageModels] = useState([]);
+  const [loadingModels, setLoadingModels] = useState(true);
+  const [filter, setFilter] = useState('');
+
+  // Fetch image models dynamically
+  useEffect(() => {
+    fetch('/api/images')
+      .then(res => res.json())
+      .then(data => {
+        // Combine aliases with fetched models
+        const aliases = data.aliases || [];
+        const models = data.models || [];
+        const combined = [...aliases, ...models.map(id => ({ 
+          id, 
+          name: id.split('/').pop().replace(/-/g, ' '),
+          supportsEdit: id.toLowerCase().includes('gemini') && id.toLowerCase().includes('image')
+        }))];
+        setImageModels(combined);
+      })
+      .catch(console.error)
+      .finally(() => setLoadingModels(false));
+  }, []);
+
+  const selectedModel = imageModels.find(m => m.id === model);
+  const filteredModels = filter 
+    ? imageModels.filter(m => m.id.toLowerCase().includes(filter.toLowerCase()) || m.name?.toLowerCase().includes(filter.toLowerCase()))
+    : imageModels;
+
+  const handleImageUpload = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        setInputImage(event.target.result);
+        setInputImagePreview(event.target.result);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const clearInputImage = () => {
+    setInputImage(null);
+    setInputImagePreview(null);
+  };
+
+  const generateImage = async () => {
+    if (!prompt.trim()) return;
+    setLoading(true);
+    setError(null);
+    setGeneratedImage(null);
+
+    try {
+      const body = { prompt, model, size };
+      if (inputImage && selectedModel?.supportsEdit) {
+        body.image = inputImage;
+      }
+
+      const res = await fetch('/v1/images/generations', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${profile?.apiKey}`
+        },
+        body: JSON.stringify(body)
+      });
+
+      const data = await res.json();
+      
+      if (data.error) {
+        setError(data.error.message || 'Generation failed');
+      } else if (data.data && data.data[0]) {
+        const imgData = data.data[0];
+        if (imgData.b64_json) {
+          setGeneratedImage(`data:image/png;base64,${imgData.b64_json}`);
+        } else if (imgData.url) {
+          setGeneratedImage(imgData.url);
+        }
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const downloadImage = () => {
+    if (!generatedImage) return;
+    const link = document.createElement('a');
+    link.href = generatedImage;
+    link.download = `generated-${Date.now()}.png`;
+    link.click();
+  };
+
+  return (
+    <div className="tab-content">
+      <h1>Image Generation</h1>
+      
+      <div className="playground-grid">
+        <div className="card">
+          <h3>Generate Image</h3>
+          
+          <div className="form-group">
+            <label>Model ({imageModels.length} available)</label>
+            <input 
+              type="text" 
+              placeholder="Search models..." 
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              className="model-search"
+            />
+            <select value={model} onChange={(e) => setModel(e.target.value)} disabled={loadingModels}>
+              {loadingModels ? (
+                <option>Loading models...</option>
+              ) : (
+                filteredModels.map(m => (
+                  <option key={m.id} value={m.id}>{m.name || m.id} {m.supportsEdit ? '(img2img)' : ''}</option>
+                ))
+              )}
+            </select>
+          </div>
+
+          <div className="form-group">
+            <label>Prompt</label>
+            <textarea 
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="Describe the image you want to generate..."
+              rows={4}
+            />
+          </div>
+
+          <div className="form-group">
+            <label>Size</label>
+            <select value={size} onChange={(e) => setSize(e.target.value)}>
+              <option value="1024x1024">1024x1024</option>
+              <option value="1024x1792">1024x1792 (Portrait)</option>
+              <option value="1792x1024">1792x1024 (Landscape)</option>
+              <option value="512x512">512x512</option>
+            </select>
+          </div>
+
+          {selectedModel?.supportsEdit && (
+            <div className="form-group">
+              <label>Input Image (Optional - for editing)</label>
+              <div className="image-upload-area">
+                {inputImagePreview ? (
+                  <div className="input-image-preview">
+                    <img src={inputImagePreview} alt="Input" />
+                    <button className="btn btn-secondary btn-sm" onClick={clearInputImage}>
+                      <X size={14} /> Remove
+                    </button>
+                  </div>
+                ) : (
+                  <label className="upload-label">
+                    <input type="file" accept="image/*" onChange={handleImageUpload} hidden />
+                    <span>Click to upload an image for editing</span>
+                  </label>
+                )}
+              </div>
+            </div>
+          )}
+
+          <button className="btn btn-primary" onClick={generateImage} disabled={loading || !prompt.trim()}>
+            {loading ? 'Generating...' : 'Generate Image'}
+          </button>
+        </div>
+
+        <div className="card">
+          <h3>Result</h3>
+          {error && <div className="error-message">{error}</div>}
+          {loading && <div className="loading-spinner">Generating your image...</div>}
+          {generatedImage && (
+            <div className="generated-image-container">
+              <img src={generatedImage} alt="Generated" className="generated-image" />
+              <button className="btn btn-secondary" onClick={downloadImage}>
+                Download Image
+              </button>
+            </div>
+          )}
+          {!generatedImage && !loading && !error && (
+            <p className="placeholder-text">Your generated image will appear here</p>
+          )}
+        </div>
+      </div>
+
+      <div className="card">
+        <h3>API Usage</h3>
+        <pre className="code-block">
+{`curl -X POST "${API_URL}/v1/images/generations" \\
+  -H "Authorization: Bearer ${profile?.apiKey || 'YOUR_API_KEY'}" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "gpt-image-1",
+    "prompt": "A cute cat wearing a space helmet",
+    "size": "1024x1024"
+  }'`}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
 function DocsTab({ profile }) {
   return (
     <div className="tab-content">
@@ -873,7 +1086,7 @@ console.log(response.choices[0].message.content);`}
       </div>
 
       <div className="card">
-        <h3>Available Models</h3>
+        <h3>Available Chat Models</h3>
         <div className="docs-models">
           <div>
             <h4>OpenAI Models</h4>
@@ -899,8 +1112,66 @@ console.log(response.choices[0].message.content);`}
             </ul>
           </div>
         </div>
-        <p className="note" style={{ marginTop: '1rem' }}>15 free requests/day. Add your own Puter key for unlimited access.</p>
       </div>
+
+      <div className="card">
+        <h3>Image Generation Models</h3>
+        <pre className="code-block">
+{`# Image Generation API
+POST ${API_URL}/v1/images/generations
+
+{
+  "model": "gpt-image-1",  // or dall-e-3, nano-banana, seedream-4, flux-schnell, etc.
+  "prompt": "A beautiful sunset over mountains",
+  "size": "1024x1024"
+}`}
+        </pre>
+        <div className="docs-models" style={{ marginTop: '1rem' }}>
+          <div>
+            <h4>OpenAI</h4>
+            <ul>
+              <li>gpt-image-1, dall-e-3, dall-e-2</li>
+            </ul>
+          </div>
+          <div>
+            <h4>Google (Nano Banana)</h4>
+            <ul>
+              <li>nano-banana (Gemini 2.5 Flash)</li>
+              <li>nano-banana-pro (Gemini 3 Pro)</li>
+            </ul>
+          </div>
+          <div>
+            <h4>Other</h4>
+            <ul>
+              <li>seedream-3, seedream-4 (ByteDance)</li>
+              <li>flux-schnell, flux-kontext</li>
+              <li>stable-diffusion-3, sdxl</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <h3>Vision (Image Input)</h3>
+        <pre className="code-block">
+{`# Send images to vision-capable models
+POST ${API_URL}/v1/chat/completions
+
+{
+  "model": "gpt-4o",
+  "messages": [{
+    "role": "user",
+    "content": [
+      {"type": "text", "text": "What's in this image?"},
+      {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+    ]
+  }]
+}`}
+        </pre>
+        <p className="note" style={{ marginTop: '0.5rem' }}>Vision works with GPT-4o, Claude, Gemini, and other multimodal models.</p>
+      </div>
+
+      <p className="note" style={{ marginTop: '1rem' }}>15 free requests/day. Add your own Puter key for unlimited access.</p>
     </div>
   );
 }

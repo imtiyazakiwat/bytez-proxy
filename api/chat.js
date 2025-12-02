@@ -160,11 +160,39 @@ const OPENROUTER_MODEL_MAP = {
   'grok-2': 'x-ai/grok-2',
 };
 
+// Check if content array contains images
+function hasImageContent(content) {
+  if (!Array.isArray(content)) return false;
+  return content.some(part => 
+    part.type === 'image_url' || 
+    part.type === 'image' ||
+    (part.image_url && part.image_url.url)
+  );
+}
+
 // Normalize content - handle array format (Claude Code) vs string format
-function normalizeContent(content) {
+// preserveImages: if true, keep image_url parts for vision models
+function normalizeContent(content, preserveImages = false) {
   if (content == null) return '';
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
+    // If preserving images and content has images, return the array as-is for vision
+    if (preserveImages && hasImageContent(content)) {
+      return content.map(part => {
+        if (typeof part === 'string') return { type: 'text', text: part };
+        if (part.type === 'text') return part;
+        if (part.type === 'image_url') return part;
+        if (part.type === 'image') {
+          // Convert 'image' type to 'image_url' format
+          return {
+            type: 'image_url',
+            image_url: { url: part.url || part.source?.url || part.data }
+          };
+        }
+        return null;
+      }).filter(Boolean);
+    }
+    
     // Handle multimodal content array format: [{type: "text", text: "..."}, ...]
     return content
       .map(part => {
@@ -748,7 +776,12 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: { message: 'messages array is required' } });
     }
     
-    // Sanitize messages while preserving tool call structure
+    // Check if any message contains images (for vision support)
+    const hasImages = messages.some(msg => 
+      Array.isArray(msg.content) && hasImageContent(msg.content)
+    );
+    
+    // Sanitize messages while preserving tool call structure and images
     messages = messages.map(msg => {
       const sanitized = { role: msg.role || 'user' };
       
@@ -778,8 +811,13 @@ export default async function handler(req, res) {
         return sanitized;
       }
       
-      // Regular messages - normalize content (handle array format from Claude Code)
-      sanitized.content = normalizeContent(msg.content);
+      // Regular messages - normalize content, preserve images for vision models
+      // If content is array with images, preserve the multimodal format
+      if (hasImages && Array.isArray(msg.content) && hasImageContent(msg.content)) {
+        sanitized.content = normalizeContent(msg.content, true); // preserveImages = true
+      } else {
+        sanitized.content = normalizeContent(msg.content);
+      }
       
       // Preserve name field if present
       if (msg.name) sanitized.name = msg.name;
@@ -790,6 +828,8 @@ export default async function handler(req, res) {
       if (msg.role === 'tool') return true;
       if (msg.role === 'assistant' && msg.tool_calls) return true;
       if (msg.role === 'system') return msg.content !== '';
+      // For multimodal content (array), check if it has any content
+      if (Array.isArray(msg.content)) return msg.content.length > 0;
       return msg.content !== '';
     });
     

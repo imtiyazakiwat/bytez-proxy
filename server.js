@@ -24,10 +24,13 @@ const modelsHandler = (await import('./api/models.js')).default;
 const authHandler = (await import('./api/auth.js')).default;
 const usageHandler = (await import('./api/usage.js')).default;
 const adminHandler = (await import('./api/admin.js')).default;
+const imagesHandler = (await import('./api/images.js')).default;
 
 // API routes
 app.post('/v1/chat/completions', chatHandler);
 app.get('/v1/models', modelsHandler);
+app.all('/v1/images/generations', imagesHandler);
+app.all('/api/images', imagesHandler);
 app.all('/api/auth', authHandler);
 app.all('/api/models', modelsHandler);
 app.all('/api/usage', usageHandler);
