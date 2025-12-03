@@ -747,9 +747,20 @@ function removeThinkTags(content) {
 function addThinkingSystemPrompt(messages, thinkingBudget) {
   if (!thinkingBudget || thinkingBudget <= 0) return messages;
   
-  // Instruction aligned with Claude extended thinking and OpenAI o1 best practices
-  // Note: We don't mention the specific budget number - the model doesn't need to know it
-  const thinkingInstruction = 'IMPORTANT: You have extended thinking enabled. When solving problems or answering questions, show your reasoning process by wrapping your step-by-step thoughts in <think></think> tags before providing your final answer. Think deeply and thoroughly.';
+  // Map thinking budget to qualitative guidance
+  // This helps non-thinking models understand how much to think
+  let thinkingGuidance = '';
+  if (thinkingBudget < 2000) {
+    thinkingGuidance = 'Keep your thinking concise and focused (around 100-200 words).';
+  } else if (thinkingBudget < 5000) {
+    thinkingGuidance = 'Think through the problem step-by-step with moderate detail (around 200-400 words).';
+  } else if (thinkingBudget < 10000) {
+    thinkingGuidance = 'Think deeply and thoroughly, exploring multiple angles (around 400-800 words).';
+  } else {
+    thinkingGuidance = 'Think extensively and comprehensively, considering all aspects in great detail (800+ words).';
+  }
+  
+  const thinkingInstruction = `IMPORTANT: You have extended thinking enabled. When solving problems or answering questions, show your reasoning process by wrapping your step-by-step thoughts in <think></think> tags before providing your final answer. ${thinkingGuidance}`;
   
   // Check if there's already a system message
   const firstSystemIndex = messages.findIndex(m => m.role === 'system');
