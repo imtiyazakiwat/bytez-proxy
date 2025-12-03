@@ -392,9 +392,55 @@ function isUsageLimitedError(errorMsg) {
          msg.includes('permission denied');
 }
 
+// Models that support extended thinking with :thinking variant on Puter/OpenRouter
+// These models will be switched to their :thinking variant when thinking_budget is provided
+const THINKING_MODEL_MAP = {
+  'claude-3.7-sonnet': 'anthropic/claude-3.7-sonnet:thinking',
+  'claude-3-7-sonnet': 'anthropic/claude-3.7-sonnet:thinking',
+};
+
+// Note: Claude 4.x models (sonnet-4, sonnet-4.5, opus-4, etc.) don't have :thinking 
+// variants available on Puter/OpenRouter yet. They will use include_reasoning=true
+// but won't return reasoning content until Puter adds support.
+
+function supportsThinking(modelId) {
+  // Check if model is in thinking map or already has :thinking suffix
+  return modelId.includes(':thinking') || 
+         Object.keys(THINKING_MODEL_MAP).some(m => modelId.includes(m));
+}
+
+function getThinkingModel(modelId) {
+  // If already has :thinking suffix, return as-is
+  if (modelId.includes(':thinking')) return modelId;
+  
+  // Check if we have a mapping for this model - use exact match first
+  if (THINKING_MODEL_MAP[modelId]) {
+    return THINKING_MODEL_MAP[modelId];
+  }
+  
+  // Then try partial match (for prefixed models like openrouter:...)
+  for (const [key, value] of Object.entries(THINKING_MODEL_MAP)) {
+    if (modelId.includes(key)) {
+      return value;
+    }
+  }
+  return null;
+}
+
 async function callPuter(messages, modelId, puterToken, options = {}) {
   const hasTools = !!(options.tools && options.tools.length > 0);
-  const { driver, model } = getDriverAndModel(modelId, hasTools);
+  let { driver, model } = getDriverAndModel(modelId, hasTools);
+  
+  // Check if thinking is requested and model supports it
+  const wantsThinking = options.thinking_budget && options.thinking_budget > 0;
+  const thinkingModel = wantsThinking ? getThinkingModel(modelId) : null;
+  
+  if (thinkingModel) {
+    // Override to use the :thinking variant
+    model = `openrouter:${thinkingModel}`;
+    console.log(`[Puter] Using thinking model variant: ${model}`);
+  }
+  
   const args = { messages, model };
   if (options.max_tokens) args.max_tokens = options.max_tokens;
   if (options.temperature !== undefined) args.temperature = options.temperature;
@@ -404,6 +450,17 @@ async function callPuter(messages, modelId, puterToken, options = {}) {
   // Always enable reasoning - non-thinking models will ignore it,
   // but thinking models will return reasoning_content regardless of name pattern
   args.include_reasoning = true;
+  
+  // Enable extended thinking for supported models
+  if (thinkingModel || supportsThinking(modelId)) {
+    // Use thinking budget from options, or default to 10000 tokens
+    const thinkingBudget = options.thinking_budget || 10000;
+    args.thinking = {
+      type: 'enabled',
+      budget_tokens: thinkingBudget
+    };
+    console.log(`[Puter] Extended thinking enabled for ${modelId} with budget: ${thinkingBudget}`);
+  }
 
   console.log(`[Puter] Non-streaming request to ${driver} with model ${model}`);
 
@@ -424,6 +481,9 @@ async function callPuter(messages, modelId, puterToken, options = {}) {
 
   const data = await response.json();
   
+  // DEBUG: Log raw Puter response to see reasoning structure
+  console.log('[Puter DEBUG] Raw response:', JSON.stringify(data, null, 2).substring(0, 3000));
+  
   if (!data.success) {
     const errorMsg = data.error?.message || data.error || 'Puter API error';
     const error = new Error(errorMsg);
@@ -436,7 +496,17 @@ async function callPuter(messages, modelId, puterToken, options = {}) {
 // Streaming version of callPuter - uses true streaming with readable stream
 async function callPuterStream(messages, modelId, puterToken, options = {}, onChunk) {
   const hasTools = !!(options.tools && options.tools.length > 0);
-  const { driver, model } = getDriverAndModel(modelId, hasTools);
+  let { driver, model } = getDriverAndModel(modelId, hasTools);
+  
+  // Check if thinking is requested and model supports it
+  const wantsThinking = options.thinking_budget && options.thinking_budget > 0;
+  const thinkingModel = wantsThinking ? getThinkingModel(modelId) : null;
+  
+  if (thinkingModel) {
+    // Override to use the :thinking variant
+    model = `openrouter:${thinkingModel}`;
+    console.log(`[Puter Stream] Using thinking model variant: ${model}`);
+  }
   
   const args = { messages, model, stream: true };
   if (options.max_tokens) args.max_tokens = options.max_tokens;
@@ -444,6 +514,16 @@ async function callPuterStream(messages, modelId, puterToken, options = {}, onCh
   if (options.tools) args.tools = options.tools;
   if (options.tool_choice) args.tool_choice = options.tool_choice;
   args.include_reasoning = true;
+  
+  // Enable extended thinking for supported models
+  if (thinkingModel || supportsThinking(modelId)) {
+    const thinkingBudget = options.thinking_budget || 10000;
+    args.thinking = {
+      type: 'enabled',
+      budget_tokens: thinkingBudget
+    };
+    console.log(`[Puter Stream] Extended thinking enabled for ${modelId} with budget: ${thinkingBudget}`);
+  }
 
   console.log(`[Puter] Streaming request to ${driver} with model ${model}`);
 
@@ -640,6 +720,13 @@ function extractReasoning(result) {
   
   if (reasoningContent) return reasoningContent;
   
+  // Check reasoning_details array (OpenRouter extended thinking format)
+  const reasoningDetails = result.message?.reasoning_details
+    || result.choices?.[0]?.message?.reasoning_details;
+  if (reasoningDetails && Array.isArray(reasoningDetails) && reasoningDetails.length > 0) {
+    return reasoningDetails.map(d => d.text || '').join('\n');
+  }
+  
   // Check for thinking in content (some models wrap it in <think> tags)
   const content = extractContent(result);
   if (content && content.includes('<think>')) {
@@ -648,6 +735,38 @@ function extractReasoning(result) {
   }
   
   return null;
+}
+
+// Remove <think> tags from content
+function removeThinkTags(content) {
+  if (!content || typeof content !== 'string') return content;
+  return content.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
+}
+
+// Add thinking system prompt for any model when thinking_budget is provided
+function addThinkingSystemPrompt(messages, thinkingBudget) {
+  if (!thinkingBudget || thinkingBudget <= 0) return messages;
+  
+  const thinkingInstruction = 'IMPORTANT: When solving problems or answering questions, you MUST show your reasoning process by wrapping your step-by-step thoughts in <think></think> tags before providing your final answer. Be thorough in your thinking process.';
+  
+  // Check if there's already a system message
+  const firstSystemIndex = messages.findIndex(m => m.role === 'system');
+  
+  if (firstSystemIndex !== -1) {
+    // Merge with existing system prompt
+    const updatedMessages = [...messages];
+    updatedMessages[firstSystemIndex] = {
+      ...updatedMessages[firstSystemIndex],
+      content: `${updatedMessages[firstSystemIndex].content}\n\n${thinkingInstruction}`
+    };
+    return updatedMessages;
+  } else {
+    // Add new system message at the beginning
+    return [{
+      role: 'system',
+      content: thinkingInstruction
+    }, ...messages];
+  }
 }
 
 function extractUsage(result) {
@@ -693,9 +812,14 @@ function getProvider(modelId) {
 }
 
 function puterToOpenAI(puterResult, model) {
-  const content = extractContent(puterResult);
+  let content = extractContent(puterResult);
   const reasoning = extractReasoning(puterResult);
   const finishReason = puterResult.finish_reason || puterResult.finishReason || 'stop';
+
+  // Remove <think> tags from content (they're extracted to reasoning_content)
+  if (content && typeof content === 'string') {
+    content = removeThinkTags(content);
+  }
 
   // Build the assistant message
   const message = { role: 'assistant', content: content || null };
@@ -766,7 +890,7 @@ export default async function handler(req, res) {
       return res.status(401).json({ error: { message: 'Invalid API key' } });
     }
 
-    const { stream, temperature, max_tokens, tools, tool_choice } = req.body;
+    const { stream, temperature, max_tokens, tools, tool_choice, thinking_budget } = req.body;
     model = req.body.model;
     const provider = getProvider(model);
 
@@ -851,6 +975,11 @@ export default async function handler(req, res) {
     if (messages.length === 0) {
       return res.status(400).json({ error: { message: 'At least one message with content is required' } });
     }
+    
+    // Add thinking system prompt when thinking_budget is provided
+    if (thinking_budget && thinking_budget > 0) {
+      messages = addThinkingSystemPrompt(messages, thinking_budget);
+    }
 
     // DEBUG: Log sanitized messages
     console.log('\n========== SANITIZED MESSAGES ==========');
@@ -891,7 +1020,7 @@ export default async function handler(req, res) {
       await incrementUsage(user.id);
     }
 
-    const requestOptions = { temperature, max_tokens, tools, tool_choice };
+    const requestOptions = { temperature, max_tokens, tools, tool_choice, thinking_budget };
 
     if (stream) {
       return handleStream(res, messages, model, userKeys, systemKeys, requestOptions, user, provider);
@@ -973,14 +1102,97 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
         res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
       }
 
+      // Track if we're inside <think> tags for streaming
+      let insideThinkTag = false;
+      let thinkBuffer = '';
+      let textBuffer = ''; // Buffer to accumulate text for tag detection
+
       // Call Puter with streaming, process chunks via callback
       await callPuterStream(messages, model, usedKey, options, (chunk) => {
         if (chunk.type === 'text' && chunk.text) {
-          totalContent += chunk.text;
-          res.write(`data: ${JSON.stringify({ 
-            id, object: 'chat.completion.chunk', created, model, 
-            choices: [{ index: 0, delta: { content: chunk.text }, finish_reason: null }] 
-          })}\n\n`);
+          // Accumulate text in buffer for proper tag detection
+          textBuffer += chunk.text;
+          
+          // Process buffer to extract <think> tags
+          let processedText = '';
+          let i = 0;
+          
+          while (i < textBuffer.length) {
+            if (!insideThinkTag) {
+              // Look for opening <think> tag
+              const thinkStart = textBuffer.indexOf('<think>', i);
+              if (thinkStart !== -1) {
+                // Send content before <think> tag
+                const beforeThink = textBuffer.substring(i, thinkStart);
+                if (beforeThink) {
+                  processedText += beforeThink;
+                }
+                insideThinkTag = true;
+                i = thinkStart + 7; // Skip '<think>'
+              } else {
+                // Check if we might have a partial <think> tag at the end
+                const remaining = textBuffer.substring(i);
+                const partialTag = '<think>'.substring(0, Math.min(remaining.length, 7));
+                if (remaining.endsWith(partialTag.substring(0, remaining.length))) {
+                  // Might be start of <think> tag, keep in buffer
+                  textBuffer = remaining;
+                  break;
+                } else {
+                  // No <think> tag, send rest of text
+                  processedText += remaining;
+                  textBuffer = '';
+                  break;
+                }
+              }
+            } else {
+              // Inside <think> tag, look for closing </think>
+              const thinkEnd = textBuffer.indexOf('</think>', i);
+              if (thinkEnd !== -1) {
+                // Extract thinking content
+                const thinkContent = textBuffer.substring(i, thinkEnd);
+                thinkBuffer += thinkContent;
+                
+                // Send accumulated thinking as reasoning
+                if (thinkBuffer) {
+                  totalReasoning += thinkBuffer;
+                  res.write(`data: ${JSON.stringify({ 
+                    id, object: 'chat.completion.chunk', created, model, 
+                    choices: [{ index: 0, delta: { reasoning_content: thinkBuffer }, finish_reason: null }] 
+                  })}\n\n`);
+                  thinkBuffer = '';
+                }
+                
+                insideThinkTag = false;
+                i = thinkEnd + 8; // Skip '</think>'
+                textBuffer = textBuffer.substring(i);
+                i = 0;
+              } else {
+                // Check if we might have a partial </think> tag at the end
+                const remaining = textBuffer.substring(i);
+                const partialTag = '</think>'.substring(0, Math.min(remaining.length, 8));
+                if (remaining.endsWith(partialTag.substring(0, remaining.length))) {
+                  // Might be start of </think> tag, keep in buffer
+                  thinkBuffer += textBuffer.substring(i, textBuffer.length - remaining.length + i);
+                  textBuffer = remaining;
+                  break;
+                } else {
+                  // No closing tag yet, buffer all thinking content
+                  thinkBuffer += remaining;
+                  textBuffer = '';
+                  break;
+                }
+              }
+            }
+          }
+          
+          // Send processed text (without <think> tags)
+          if (processedText) {
+            totalContent += processedText;
+            res.write(`data: ${JSON.stringify({ 
+              id, object: 'chat.completion.chunk', created, model, 
+              choices: [{ index: 0, delta: { content: processedText }, finish_reason: null }] 
+            })}\n\n`);
+          }
         } else if (chunk.type === 'reasoning' && chunk.text) {
           totalReasoning += chunk.text;
           res.write(`data: ${JSON.stringify({ 
@@ -1004,10 +1216,11 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
           })}\n\n`);
           toolCallIndex++;
         } else if (chunk.message?.content) {
-          totalContent = chunk.message.content;
+          const content = removeThinkTags(chunk.message.content);
+          totalContent = content;
           res.write(`data: ${JSON.stringify({ 
             id, object: 'chat.completion.chunk', created, model, 
-            choices: [{ index: 0, delta: { content: chunk.message.content }, finish_reason: null }] 
+            choices: [{ index: 0, delta: { content }, finish_reason: null }] 
           })}\n\n`);
         }
       });
