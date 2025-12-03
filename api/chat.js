@@ -1117,94 +1117,112 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
 
       // Track if we're inside <think> tags for streaming
       let insideThinkTag = false;
-      let thinkBuffer = '';
-      let textBuffer = ''; // Buffer to accumulate text for tag detection
+      let tagBuffer = ''; // Small buffer only for detecting partial tags
 
       // Call Puter with streaming, process chunks via callback
       await callPuterStream(messages, model, usedKey, options, (chunk) => {
         if (chunk.type === 'text' && chunk.text) {
-          // Accumulate text in buffer for proper tag detection
-          textBuffer += chunk.text;
+          // Combine any buffered partial tag with new text
+          let text = tagBuffer + chunk.text;
+          tagBuffer = '';
           
-          // Process buffer to extract <think> tags
-          let processedText = '';
-          let i = 0;
-          
-          while (i < textBuffer.length) {
+          // Process text character by character for real-time streaming
+          while (text.length > 0) {
             if (!insideThinkTag) {
               // Look for opening <think> tag
-              const thinkStart = textBuffer.indexOf('<think>', i);
+              const thinkStart = text.indexOf('<think>');
               if (thinkStart !== -1) {
-                // Send content before <think> tag
-                const beforeThink = textBuffer.substring(i, thinkStart);
+                // Send content before <think> tag immediately
+                const beforeThink = text.substring(0, thinkStart);
                 if (beforeThink) {
-                  processedText += beforeThink;
-                }
-                insideThinkTag = true;
-                i = thinkStart + 7; // Skip '<think>'
-              } else {
-                // Check if we might have a partial <think> tag at the end
-                const remaining = textBuffer.substring(i);
-                const partialTag = '<think>'.substring(0, Math.min(remaining.length, 7));
-                if (remaining.endsWith(partialTag.substring(0, remaining.length))) {
-                  // Might be start of <think> tag, keep in buffer
-                  textBuffer = remaining;
-                  break;
-                } else {
-                  // No <think> tag, send rest of text
-                  processedText += remaining;
-                  textBuffer = '';
-                  break;
-                }
-              }
-            } else {
-              // Inside <think> tag, look for closing </think>
-              const thinkEnd = textBuffer.indexOf('</think>', i);
-              if (thinkEnd !== -1) {
-                // Extract thinking content
-                const thinkContent = textBuffer.substring(i, thinkEnd);
-                thinkBuffer += thinkContent;
-                
-                // Send accumulated thinking as reasoning
-                if (thinkBuffer) {
-                  totalReasoning += thinkBuffer;
+                  totalContent += beforeThink;
                   res.write(`data: ${JSON.stringify({ 
                     id, object: 'chat.completion.chunk', created, model, 
-                    choices: [{ index: 0, delta: { reasoning_content: thinkBuffer }, finish_reason: null }] 
+                    choices: [{ index: 0, delta: { content: beforeThink }, finish_reason: null }] 
                   })}\n\n`);
-                  thinkBuffer = '';
+                }
+                insideThinkTag = true;
+                text = text.substring(thinkStart + 7); // Skip '<think>'
+              } else {
+                // Check for partial <think> tag at end (e.g., "<thi", "<think")
+                let partialMatch = '';
+                for (let len = Math.min(6, text.length); len > 0; len--) {
+                  const suffix = text.substring(text.length - len);
+                  if ('<think>'.startsWith(suffix)) {
+                    partialMatch = suffix;
+                    break;
+                  }
                 }
                 
-                insideThinkTag = false;
-                i = thinkEnd + 8; // Skip '</think>'
-                textBuffer = textBuffer.substring(i);
-                i = 0;
-              } else {
-                // Check if we might have a partial </think> tag at the end
-                const remaining = textBuffer.substring(i);
-                const partialTag = '</think>'.substring(0, Math.min(remaining.length, 8));
-                if (remaining.endsWith(partialTag.substring(0, remaining.length))) {
-                  // Might be start of </think> tag, keep in buffer
-                  thinkBuffer += textBuffer.substring(i, textBuffer.length - remaining.length + i);
-                  textBuffer = remaining;
-                  break;
+                if (partialMatch) {
+                  // Buffer the potential partial tag, send the rest
+                  const toSend = text.substring(0, text.length - partialMatch.length);
+                  if (toSend) {
+                    totalContent += toSend;
+                    res.write(`data: ${JSON.stringify({ 
+                      id, object: 'chat.completion.chunk', created, model, 
+                      choices: [{ index: 0, delta: { content: toSend }, finish_reason: null }] 
+                    })}\n\n`);
+                  }
+                  tagBuffer = partialMatch;
                 } else {
-                  // No closing tag yet, buffer all thinking content
-                  thinkBuffer += remaining;
-                  textBuffer = '';
-                  break;
+                  // No tag, send all text immediately
+                  totalContent += text;
+                  res.write(`data: ${JSON.stringify({ 
+                    id, object: 'chat.completion.chunk', created, model, 
+                    choices: [{ index: 0, delta: { content: text }, finish_reason: null }] 
+                  })}\n\n`);
                 }
+                text = '';
+              }
+            } else {
+              // Inside <think> tag - stream reasoning content in real-time
+              const thinkEnd = text.indexOf('</think>');
+              if (thinkEnd !== -1) {
+                // Send thinking content before closing tag immediately
+                const thinkContent = text.substring(0, thinkEnd);
+                if (thinkContent) {
+                  totalReasoning += thinkContent;
+                  res.write(`data: ${JSON.stringify({ 
+                    id, object: 'chat.completion.chunk', created, model, 
+                    choices: [{ index: 0, delta: { reasoning_content: thinkContent }, finish_reason: null }] 
+                  })}\n\n`);
+                }
+                insideThinkTag = false;
+                text = text.substring(thinkEnd + 8); // Skip '</think>'
+              } else {
+                // Check for partial </think> tag at end
+                let partialMatch = '';
+                for (let len = Math.min(7, text.length); len > 0; len--) {
+                  const suffix = text.substring(text.length - len);
+                  if ('</think>'.startsWith(suffix)) {
+                    partialMatch = suffix;
+                    break;
+                  }
+                }
+                
+                if (partialMatch) {
+                  // Buffer the potential partial tag, stream the rest as reasoning immediately
+                  const toSend = text.substring(0, text.length - partialMatch.length);
+                  if (toSend) {
+                    totalReasoning += toSend;
+                    res.write(`data: ${JSON.stringify({ 
+                      id, object: 'chat.completion.chunk', created, model, 
+                      choices: [{ index: 0, delta: { reasoning_content: toSend }, finish_reason: null }] 
+                    })}\n\n`);
+                  }
+                  tagBuffer = partialMatch;
+                } else {
+                  // No closing tag yet, stream all as reasoning immediately
+                  totalReasoning += text;
+                  res.write(`data: ${JSON.stringify({ 
+                    id, object: 'chat.completion.chunk', created, model, 
+                    choices: [{ index: 0, delta: { reasoning_content: text }, finish_reason: null }] 
+                  })}\n\n`);
+                }
+                text = '';
               }
             }
-          }
-          
-          // Send processed text (without <think> tags)
-          if (processedText) {
-            totalContent += processedText;
-            res.write(`data: ${JSON.stringify({ 
-              id, object: 'chat.completion.chunk', created, model, 
-              choices: [{ index: 0, delta: { content: processedText }, finish_reason: null }] 
-            })}\n\n`);
           }
         } else if (chunk.type === 'reasoning' && chunk.text) {
           totalReasoning += chunk.text;
