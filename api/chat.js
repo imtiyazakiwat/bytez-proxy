@@ -747,7 +747,9 @@ function removeThinkTags(content) {
 function addThinkingSystemPrompt(messages, thinkingBudget) {
   if (!thinkingBudget || thinkingBudget <= 0) return messages;
   
-  const thinkingInstruction = 'IMPORTANT: When solving problems or answering questions, you MUST show your reasoning process by wrapping your step-by-step thoughts in <think></think> tags before providing your final answer. Be thorough in your thinking process.';
+  // Instruction aligned with Claude extended thinking and OpenAI o1 best practices
+  // Note: We don't mention the specific budget number - the model doesn't need to know it
+  const thinkingInstruction = 'IMPORTANT: You have extended thinking enabled. When solving problems or answering questions, show your reasoning process by wrapping your step-by-step thoughts in <think></think> tags before providing your final answer. Think deeply and thoroughly.';
   
   // Check if there's already a system message
   const firstSystemIndex = messages.findIndex(m => m.role === 'system');
