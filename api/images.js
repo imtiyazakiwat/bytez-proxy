@@ -455,7 +455,7 @@ function getDefaultImageModelsList() {
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-Puter-Token');
   
   if (req.method === 'OPTIONS') return res.status(200).end();
   
@@ -502,18 +502,27 @@ export default async function handler(req, res) {
 
   let user = null;
   let model = null;
+  
+  // Check for direct Puter token
+  const puterToken = req.headers['x-puter-token'];
 
   try {
     const authHeader = req.headers.authorization || req.headers['x-api-key'] || '';
     const apiKey = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
     
-    if (!apiKey) {
+    // If Puter token is provided, we can skip our API key auth
+    if (!apiKey && !puterToken) {
       return res.status(401).json({ error: { message: 'API key required' } });
     }
 
-    user = await getUserByApiKey(apiKey);
-    if (!user) {
-      return res.status(401).json({ error: { message: 'Invalid API key' } });
+    // If we have an API key, validate it; otherwise create a pseudo-user for Puter token
+    if (apiKey) {
+      user = await getUserByApiKey(apiKey);
+      if (!user) {
+        return res.status(401).json({ error: { message: 'Invalid API key' } });
+      }
+    } else if (puterToken) {
+      user = { id: 'puter-direct', email: 'puter-token-user', puterKeys: [] };
     }
 
     const { prompt, size, quality, n, style, response_format, image } = req.body;
@@ -526,33 +535,7 @@ export default async function handler(req, res) {
     const isImg2Img = !!image;
     console.log(`[Image] ${user.email}: ${model}, img2img: ${isImg2Img}, prompt: "${prompt.substring(0, 50)}..."`);
 
-    // Check daily limits for free users
-    const hasOwnKeys = user.puterKeys && user.puterKeys.length > 0;
-    if (!hasOwnKeys) {
-      const dailyUsed = await getDailyUsage(user);
-      if (dailyUsed >= FREE_DAILY_LIMIT) {
-        await logImageUsage(user.id, model, isImg2Img ? 'img2img' : 'txt2img', false, 'Daily limit exceeded');
-        return res.status(403).json({ 
-          error: { message: `Daily free limit (${FREE_DAILY_LIMIT}) reached.`, code: 'DAILY_LIMIT_EXCEEDED' } 
-        });
-      }
-    }
-
-    // Get API keys
-    let systemKeys = await getSystemKeys();
-    if (systemKeys.length === 0 && process.env.PUTER_API_KEY) {
-      systemKeys = [process.env.PUTER_API_KEY];
-    }
-    const userKeys = hasOwnKeys ? user.puterKeys.map(k => k.key || k) : [];
-    const allKeys = userKeys.length > 0 ? userKeys : systemKeys;
-
-    if (allKeys.length === 0) {
-      return res.status(500).json({ error: { message: 'No Puter API key configured' } });
-    }
-
-    if (!hasOwnKeys) await incrementUsage(user.id);
-
-    // Build options
+    // Build options early so we can use them for direct Puter token
     const options = {};
     if (size) options.size = size;
     if (quality) options.quality = quality;
@@ -588,6 +571,64 @@ export default async function handler(req, res) {
       'nano-banana',
       'nano-banana-pro',
     ].some(m => model.toLowerCase().includes(m.toLowerCase()));
+
+    // If Puter token provided, try using it directly first
+    if (puterToken) {
+      console.log(`[Image Puter Token] Direct token provided, attempting direct call for ${model}`);
+      try {
+        let result;
+        if (useOpenRouterDirectly) {
+          result = await callOpenRouterImageGeneration(prompt, model, puterToken, options);
+        } else {
+          result = await callPuterImageGeneration(prompt, model, puterToken, options);
+        }
+        
+        if (user.id !== 'puter-direct') {
+          await logImageUsage(user.id, model, isImg2Img ? 'img2img' : 'txt2img', true);
+        }
+        
+        const responseData = { created: Math.floor(Date.now() / 1000), data: result.data || [] };
+        if (response_format === 'url' && responseData.data[0]?.b64_json) {
+          responseData.data = responseData.data.map(d => ({
+            url: `data:${d.mime_type || 'image/png'};base64,${d.b64_json}`,
+            revised_prompt: d.revised_prompt,
+          }));
+        }
+        return res.json(responseData);
+      } catch (puterError) {
+        console.error(`[Image Puter Token] Direct token failed: ${puterError.message}`);
+        if (user.id === 'puter-direct') {
+          return res.status(500).json({ error: { message: `Puter token error: ${puterError.message}` } });
+        }
+        console.log('[Image Puter Token] Falling back to system/user keys...');
+      }
+    }
+
+    // Check daily limits for free users
+    const hasOwnKeys = user.puterKeys && user.puterKeys.length > 0;
+    if (!hasOwnKeys) {
+      const dailyUsed = await getDailyUsage(user);
+      if (dailyUsed >= FREE_DAILY_LIMIT) {
+        await logImageUsage(user.id, model, isImg2Img ? 'img2img' : 'txt2img', false, 'Daily limit exceeded');
+        return res.status(403).json({ 
+          error: { message: `Daily free limit (${FREE_DAILY_LIMIT}) reached.`, code: 'DAILY_LIMIT_EXCEEDED' } 
+        });
+      }
+    }
+
+    // Get API keys
+    let systemKeys = await getSystemKeys();
+    if (systemKeys.length === 0 && process.env.PUTER_API_KEY) {
+      systemKeys = [process.env.PUTER_API_KEY];
+    }
+    const userKeys = hasOwnKeys ? user.puterKeys.map(k => k.key || k) : [];
+    const allKeys = userKeys.length > 0 ? userKeys : systemKeys;
+
+    if (allKeys.length === 0) {
+      return res.status(500).json({ error: { message: 'No Puter API key configured' } });
+    }
+
+    if (!hasOwnKeys) await incrementUsage(user.id);
 
     // Try keys using KeyPoolManager for O(1) selection
     let lastError = null;

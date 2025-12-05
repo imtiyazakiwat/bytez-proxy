@@ -882,25 +882,35 @@ function puterToOpenAI(puterResult, model) {
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-Puter-Token');
   
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: { message: 'Method not allowed' } });
 
   let user = null;
   let model = null;
+  
+  // Check for direct Puter token - if provided, use it directly without our auth
+  const puterToken = req.headers['x-puter-token'];
 
   try {
     const authHeader = req.headers.authorization || req.headers['x-api-key'] || '';
     const apiKey = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
     
-    if (!apiKey) {
+    // If Puter token is provided, we can skip our API key auth
+    if (!apiKey && !puterToken) {
       return res.status(401).json({ error: { message: 'API key required' } });
     }
 
-    user = await getUserByApiKey(apiKey);
-    if (!user) {
-      return res.status(401).json({ error: { message: 'Invalid API key' } });
+    // If we have an API key, validate it; otherwise create a pseudo-user for Puter token
+    if (apiKey) {
+      user = await getUserByApiKey(apiKey);
+      if (!user) {
+        return res.status(401).json({ error: { message: 'Invalid API key' } });
+      }
+    } else if (puterToken) {
+      // Pseudo-user for direct Puter token usage (no rate limiting, no logging to our DB)
+      user = { id: 'puter-direct', email: 'puter-token-user', puterKeys: [] };
     }
 
     const { stream, temperature, max_tokens, tools, tool_choice, thinking_budget } = req.body;
@@ -1000,6 +1010,36 @@ export default async function handler(req, res) {
     console.log('=========================================\n');
 
     console.log(`Request from ${user.email}: ${model}, stream=${stream}`);
+
+    // If Puter token provided, try using it directly first
+    if (puterToken) {
+      console.log(`[Puter Token] Direct token provided, attempting direct call for ${model}`);
+      try {
+        const requestOptions = { temperature, max_tokens, tools, tool_choice, thinking_budget };
+        
+        if (stream) {
+          return handleStreamWithToken(res, messages, model, puterToken, requestOptions, user, provider);
+        }
+        
+        const result = await callPuter(messages, model, puterToken, requestOptions);
+        const openAIResponse = puterToOpenAI(result, model);
+        
+        // Log usage only if we have a real user
+        if (user.id !== 'puter-direct') {
+          await logUsage(user.id, model, openAIResponse.usage, provider, true, null, 'puter-token');
+        }
+        
+        return res.json(openAIResponse);
+      } catch (puterError) {
+        console.error(`[Puter Token] Direct token failed: ${puterError.message}`);
+        // If we don't have a real user (only Puter token), fail here
+        if (user.id === 'puter-direct') {
+          return res.status(500).json({ error: { message: `Puter token error: ${puterError.message}` } });
+        }
+        // Otherwise fall through to use our key system
+        console.log('[Puter Token] Falling back to system/user keys...');
+      }
+    }
 
     const hasOwnKeys = user.puterKeys && user.puterKeys.length > 0;
     
@@ -1293,6 +1333,126 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
     await logUsage(user.id, model, null, provider, false, lastError?.message || 'All keys failed');
     
     res.write(`data: ${JSON.stringify({ error: { message: lastError?.message || 'All API keys failed' } })}\n\n`);
+    res.end();
+  }
+}
+
+// Streaming handler for direct Puter token (no key rotation)
+async function handleStreamWithToken(res, messages, model, puterToken, options = {}, user, provider) {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  const id = `chatcmpl-${Date.now()}`;
+  const created = Math.floor(Date.now() / 1000);
+  
+  let totalContent = '';
+  let totalReasoning = '';
+  let toolCalls = [];
+  let toolCallIndex = 0;
+
+  try {
+    // Send initial role chunk
+    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+
+    let insideThinkTag = false;
+    let tagBuffer = '';
+
+    await callPuterStream(messages, model, puterToken, options, (chunk) => {
+      if (chunk.type === 'text' && chunk.text) {
+        let text = tagBuffer + chunk.text;
+        tagBuffer = '';
+        
+        while (text.length > 0) {
+          if (!insideThinkTag) {
+            const thinkStart = text.indexOf('<think>');
+            if (thinkStart !== -1) {
+              const beforeThink = text.substring(0, thinkStart);
+              if (beforeThink) {
+                totalContent += beforeThink;
+                res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: beforeThink }, finish_reason: null }] })}\n\n`);
+              }
+              insideThinkTag = true;
+              text = text.substring(thinkStart + 7);
+            } else {
+              let partialMatch = '';
+              for (let len = Math.min(6, text.length); len > 0; len--) {
+                const suffix = text.substring(text.length - len);
+                if ('<think>'.startsWith(suffix)) { partialMatch = suffix; break; }
+              }
+              if (partialMatch) {
+                const toSend = text.substring(0, text.length - partialMatch.length);
+                if (toSend) {
+                  totalContent += toSend;
+                  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: toSend }, finish_reason: null }] })}\n\n`);
+                }
+                tagBuffer = partialMatch;
+              } else {
+                totalContent += text;
+                res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: text }, finish_reason: null }] })}\n\n`);
+              }
+              text = '';
+            }
+          } else {
+            const thinkEnd = text.indexOf('</think>');
+            if (thinkEnd !== -1) {
+              const thinkContent = text.substring(0, thinkEnd);
+              if (thinkContent) {
+                totalReasoning += thinkContent;
+                res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { reasoning_content: thinkContent }, finish_reason: null }] })}\n\n`);
+              }
+              insideThinkTag = false;
+              text = text.substring(thinkEnd + 8);
+            } else {
+              let partialMatch = '';
+              for (let len = Math.min(7, text.length); len > 0; len--) {
+                const suffix = text.substring(text.length - len);
+                if ('</think>'.startsWith(suffix)) { partialMatch = suffix; break; }
+              }
+              if (partialMatch) {
+                const toSend = text.substring(0, text.length - partialMatch.length);
+                if (toSend) {
+                  totalReasoning += toSend;
+                  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { reasoning_content: toSend }, finish_reason: null }] })}\n\n`);
+                }
+                tagBuffer = partialMatch;
+              } else {
+                totalReasoning += text;
+                res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { reasoning_content: text }, finish_reason: null }] })}\n\n`);
+              }
+              text = '';
+            }
+          }
+        }
+      } else if (chunk.type === 'reasoning' && chunk.text) {
+        totalReasoning += chunk.text;
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { reasoning_content: chunk.text }, finish_reason: null }] })}\n\n`);
+      } else if (chunk.type === 'tool_use') {
+        const toolCall = { index: toolCallIndex, id: chunk.id, type: 'function', function: { name: chunk.name, arguments: chunk.arguments } };
+        toolCalls.push(toolCall);
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { tool_calls: [toolCall] }, finish_reason: null }] })}\n\n`);
+        toolCallIndex++;
+      } else if (chunk.message?.content) {
+        const content = removeThinkTags(chunk.message.content);
+        totalContent = content;
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`);
+      }
+    });
+    
+    const finishReason = toolCalls.length > 0 ? 'tool_calls' : 'stop';
+    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) } })}\n\n`);
+    res.write('data: [DONE]\n\n');
+    res.end();
+    
+    if (user.id !== 'puter-direct') {
+      await logUsage(user.id, model, { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) }, provider, true, null, 'puter-token');
+    }
+  } catch (error) {
+    console.error(`[Stream Puter Token] Failed:`, error.message);
+    if (user.id !== 'puter-direct') {
+      await logUsage(user.id, model, null, provider, false, error.message);
+    }
+    res.write(`data: ${JSON.stringify({ error: { message: error.message } })}\n\n`);
     res.end();
   }
 }
