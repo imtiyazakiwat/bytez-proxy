@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { auth } from '../firebase';
 import { 
   Key, LogOut, Zap, Activity, Settings, 
-  BarChart3, Code, BookOpen, Image, PieChart 
+  BarChart3, Code, BookOpen, Image, PieChart, UserPlus 
 } from 'lucide-react';
 import NavItem from './ui/NavItem';
 import OverviewPage from '../pages/OverviewPage';
@@ -13,10 +13,11 @@ import ImagesPage from '../pages/ImagesPage';
 import UsagePage from '../pages/UsagePage';
 import DocsPage from '../pages/DocsPage';
 import AdminPage from '../pages/AdminPage';
+import PuterAccountsPage from '../pages/PuterAccountsPage';
 import './Dashboard.css';
 
 const ADMIN_USER_IDS = ['7nMmX6NJHGX2mshNOeN7Zv97lrD2'];
-const VALID_TABS = ['overview', 'keys', 'models', 'playground', 'images', 'usage', 'docs', 'admin'];
+const VALID_TABS = ['overview', 'keys', 'models', 'playground', 'images', 'usage', 'puter-accounts', 'docs', 'admin'];
 
 const getTabFromHash = () => {
   const hash = window.location.hash.replace('#', '').replace('/', '');
@@ -102,6 +103,7 @@ export default function Dashboard({ user, onSignOut }) {
           <NavItem icon={<Code />} label="Playground" tab="playground" active={activeTab === 'playground'} onClick={() => changeTab('playground')} />
           <NavItem icon={<Image />} label="Images" tab="images" active={activeTab === 'images'} onClick={() => changeTab('images')} />
           <NavItem icon={<PieChart />} label="Key Usage" tab="usage" active={activeTab === 'usage'} onClick={() => changeTab('usage')} />
+          <NavItem icon={<UserPlus />} label="Create Account" tab="puter-accounts" active={activeTab === 'puter-accounts'} onClick={() => changeTab('puter-accounts')} />
           <NavItem icon={<BookOpen />} label="Docs" tab="docs" active={activeTab === 'docs'} onClick={() => changeTab('docs')} />
           {isAdmin && <NavItem icon={<Settings />} label="Admin" tab="admin" active={activeTab === 'admin'} onClick={() => changeTab('admin')} />}
         </nav>
@@ -127,6 +129,7 @@ export default function Dashboard({ user, onSignOut }) {
         {activeTab === 'playground' && <PlaygroundPage profile={profile} models={models} />}
         {activeTab === 'images' && <ImagesPage profile={profile} />}
         {activeTab === 'usage' && <UsagePage />}
+        {activeTab === 'puter-accounts' && <PuterAccountsPage profile={profile} setProfile={setProfile} />}
         {activeTab === 'docs' && <DocsPage profile={profile} />}
         {activeTab === 'admin' && isAdmin && <AdminPage />}
       </main>

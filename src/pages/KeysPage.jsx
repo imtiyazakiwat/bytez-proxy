@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { auth } from '../firebase';
-import { Copy, RefreshCw, Plus, Trash2, Check, X, Eye } from 'lucide-react';
+import { Copy, RefreshCw, Plus, Trash2, Check, X, Eye, ChevronLeft, ChevronRight, UserPlus } from 'lucide-react';
 import { formatDollars } from '../utils/format';
+
+const KEYS_PER_PAGE = 5;
 
 export default function KeysPage({ profile, setProfile, copyApiKey, copied, regenerateKey }) {
   const [showAddKey, setShowAddKey] = useState(false);
@@ -12,6 +14,7 @@ export default function KeysPage({ profile, setProfile, copyApiKey, copied, rege
   const [keyUsage, setKeyUsage] = useState(null);
   const [viewingKey, setViewingKey] = useState(null);
   const [fullKey, setFullKey] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
 
   const viewKey = async (keyIndex) => {
     try {
@@ -207,27 +210,59 @@ export default function KeysPage({ profile, setProfile, copyApiKey, copied, rege
           </div>
         )}
         
-        {profile?.puterKeys?.length > 0 && (
-          <div className="system-keys-list" style={{ marginTop: '1rem' }}>
-            <p className="card-desc" style={{ marginBottom: '0.5rem' }}>Your keys:</p>
-            {profile.puterKeys.map((key) => (
-              <div key={key.id} className="system-key-item">
-                <code>{viewingKey === key.id ? fullKey : key.preview}</code>
-                <button className="btn-icon" onClick={() => viewingKey === key.id ? setViewingKey(null) : viewKey(key.id)} title={viewingKey === key.id ? 'Hide' : 'View'}>
-                  <Eye size={16} />
-                </button>
-                {viewingKey === key.id && (
-                  <button className="btn-icon" onClick={copyFullKey} title="Copy">
-                    <Copy size={16} />
-                  </button>
+        {profile?.puterKeys?.length > 0 && (() => {
+          const totalKeys = profile.puterKeys.length;
+          const totalPages = Math.ceil(totalKeys / KEYS_PER_PAGE);
+          const startIndex = (currentPage - 1) * KEYS_PER_PAGE;
+          const paginatedKeys = profile.puterKeys.slice(startIndex, startIndex + KEYS_PER_PAGE);
+          
+          return (
+            <div className="system-keys-list" style={{ marginTop: '1rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                <p className="card-desc" style={{ margin: 0 }}>Your keys ({totalKeys}):</p>
+                {totalPages > 1 && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <button 
+                      className="btn-icon" 
+                      onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                      disabled={currentPage === 1}
+                      title="Previous"
+                    >
+                      <ChevronLeft size={16} />
+                    </button>
+                    <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                      {currentPage} / {totalPages}
+                    </span>
+                    <button 
+                      className="btn-icon" 
+                      onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                      disabled={currentPage === totalPages}
+                      title="Next"
+                    >
+                      <ChevronRight size={16} />
+                    </button>
+                  </div>
                 )}
-                <button className="btn-icon" onClick={() => removeKey(key.id)} title="Remove">
-                  <Trash2 size={16} />
-                </button>
               </div>
-            ))}
-          </div>
-        )}
+              {paginatedKeys.map((key) => (
+                <div key={key.id} className="system-key-item">
+                  <code className={viewingKey === key.id ? 'full-key' : ''}>{viewingKey === key.id ? fullKey : key.preview}</code>
+                  <button className="btn-icon" onClick={() => viewingKey === key.id ? setViewingKey(null) : viewKey(key.id)} title={viewingKey === key.id ? 'Hide' : 'View'}>
+                    <Eye size={16} />
+                  </button>
+                  {viewingKey === key.id && (
+                    <button className="btn-icon" onClick={copyFullKey} title="Copy">
+                      <Copy size={16} />
+                    </button>
+                  )}
+                  <button className="btn-icon" onClick={() => removeKey(key.id)} title="Remove">
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          );
+        })()}
         
         <div className="keys-status" style={{ marginTop: '1rem' }}>
           <span className={`status-badge ${profile?.puterKeysCount > 0 ? 'active' : ''}`}>
@@ -237,7 +272,9 @@ export default function KeysPage({ profile, setProfile, copyApiKey, copied, rege
         </div>
         
         <p className="card-desc" style={{ marginTop: '1rem' }}>
-          Get keys from <a href="https://puter.com" target="_blank" rel="noopener noreferrer">puter.com</a>
+          <a href="#puter-accounts" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', color: 'var(--accent)' }}>
+            <UserPlus size={14} /> Create Account
+          </a> to get new Puter keys
         </p>
       </div>
     </div>
