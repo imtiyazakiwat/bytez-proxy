@@ -28,49 +28,83 @@ function generateApiKey() {
   return `sk-${uuidv4().replace(/-/g, '')}`;
 }
 
-const PUTER_BASE_URL = 'https://api.puter.com/drivers/call';
+const PUTER_API_BASE = 'https://api.puter.com';
 
-// Test if a Puter API key is valid
+// Fetch Puter key usage info
+async function getPuterKeyUsage(key) {
+  const origins = ['https://puter.com', 'https://g4f.dev', 'https://api.puter.com'];
+  
+  for (const origin of origins) {
+    try {
+      const [whoamiRes, usageRes] = await Promise.all([
+        fetch(`${PUTER_API_BASE}/whoami`, {
+          headers: { 'Authorization': `Bearer ${key}`, 'Origin': origin }
+        }),
+        fetch(`${PUTER_API_BASE}/metering/usage`, {
+          headers: { 'Authorization': `Bearer ${key}`, 'Origin': origin }
+        })
+      ]);
+      
+      const whoami = await whoamiRes.json();
+      const usage = await usageRes.json();
+      
+      // If we got valid data, return it
+      if (whoami.username || whoami.uuid) {
+        return {
+          username: whoami.username,
+          isTemp: whoami.is_temp,
+          used: usage.usage?.total || 0,
+          allowance: usage.allowanceInfo?.monthUsageAllowance || 0,
+          remaining: usage.allowanceInfo?.remaining || 0
+        };
+      }
+    } catch (e) {
+      continue;
+    }
+  }
+  
+  return null;
+}
+
+// Test if a Puter API key is valid using whoami endpoint
 async function testPuterKey(key) {
   try {
-    const response = await fetch(PUTER_BASE_URL, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${key}`,
-        'Content-Type': 'application/json',
-        'Origin': 'https://puter.com',
-      },
-      body: JSON.stringify({
-        interface: 'puter-chat-completion',
-        driver: 'openai-completion',
-        method: 'complete',
-        args: {
-          messages: [{ role: 'user', content: 'Hi' }],
-          model: 'gpt-4o-mini',
-          max_tokens: 5,
-        },
-      }),
-    });
+    // Try with different origins as some keys are bound to specific origins
+    const origins = ['https://puter.com', 'https://g4f.dev', 'https://api.puter.com'];
+    
+    for (const origin of origins) {
+      try {
+        const response = await fetch(`${PUTER_API_BASE}/whoami`, {
+          headers: {
+            'Authorization': `Bearer ${key}`,
+            'Origin': origin,
+          },
+        });
 
+        const data = await response.json();
+        
+        // If we get a username or uuid, the key is valid
+        if (data.username || data.uuid) {
+          const warning = data.is_temp ? 'Temp user account' : null;
+          return { valid: true, message: warning ? `Key valid (${warning})` : 'Key is valid!', warning: !!warning };
+        }
+      } catch (e) {
+        // Try next origin
+        continue;
+      }
+    }
+    
+    // If all origins failed, try one more time and return the error
+    const response = await fetch(`${PUTER_API_BASE}/whoami`, {
+      headers: { 'Authorization': `Bearer ${key}` },
+    });
     const data = await response.json();
     
-    if (data.success) {
-      return { valid: true, message: 'Key is valid and working' };
+    if (data.username || data.uuid) {
+      return { valid: true, message: 'Key is valid!' };
     }
     
-    const errorMsg = data.error?.message || data.error || 'Unknown error';
-    
-    // These errors mean the key is valid but has usage limits
-    if (errorMsg.includes('usage-limited') || errorMsg.includes('rate limit') || errorMsg.includes('quota')) {
-      return { valid: true, message: 'Key is valid (but may have usage limits)', warning: true };
-    }
-    
-    // Invalid key errors
-    if (errorMsg.includes('invalid') || errorMsg.includes('unauthorized') || errorMsg.includes('authentication')) {
-      return { valid: false, message: 'Invalid API key' };
-    }
-    
-    return { valid: false, message: errorMsg };
+    return { valid: false, message: data.message || 'Invalid API key' };
   } catch (error) {
     return { valid: false, message: `Connection error: ${error.message}` };
   }
@@ -181,6 +215,35 @@ export default async function handler(req, res) {
         return res.json(testResult);
       }
       
+      if (action === 'checkKey') {
+        if (!key || !key.trim()) {
+          return res.status(400).json({ error: 'Key is required' });
+        }
+        
+        // Test the key first
+        const testResult = await testPuterKey(key.trim());
+        if (!testResult.valid) {
+          return res.status(400).json({ error: `Invalid key: ${testResult.message}` });
+        }
+        
+        // Check if key is already added
+        const userDoc = await userRef.get();
+        const userData = userDoc.data();
+        const existingKeys = userData?.puterKeys || [];
+        const isAlreadyAdded = existingKeys.includes(key.trim());
+        
+        // Get usage info
+        const usageInfo = await getPuterKeyUsage(key.trim());
+        
+        return res.json({ 
+          valid: true, 
+          message: testResult.warning ? 'Key valid (may have limits)' : 'Key is valid!',
+          warning: testResult.warning,
+          usage: usageInfo,
+          isAlreadyAdded
+        });
+      }
+      
       if (action === 'addKey') {
         if (!key || !key.trim()) {
           return res.status(400).json({ error: 'Key is required' });
@@ -191,6 +254,9 @@ export default async function handler(req, res) {
         if (!testResult.valid) {
           return res.status(400).json({ error: `Invalid key: ${testResult.message}` });
         }
+        
+        // Get usage info for the key
+        const usageInfo = await getPuterKeyUsage(key.trim());
         
         const field = 'puterKeys';
         const userDoc = await userRef.get();
@@ -204,7 +270,12 @@ export default async function handler(req, res) {
         keys.push(key.trim());
         await userRef.update({ [field]: keys, updatedAt: new Date().toISOString() });
         
-        return res.json({ success: true, keysCount: keys.length, warning: testResult.warning });
+        return res.json({ 
+          success: true, 
+          keysCount: keys.length, 
+          warning: testResult.warning,
+          usage: usageInfo
+        });
       }
       
       if (action === 'removeKey') {
@@ -232,9 +303,26 @@ export default async function handler(req, res) {
         await userRef.update({ apiKey: newApiKey, updatedAt: new Date().toISOString() });
         return res.json({ success: true, apiKey: newApiKey });
       }
+      
+      if (action === 'getFullKey') {
+        const { keyIndex } = req.body;
+        if (keyIndex === undefined) {
+          return res.status(400).json({ error: 'Key index is required' });
+        }
+        
+        const userDoc = await userRef.get();
+        const userData = userDoc.data();
+        const keys = userData.puterKeys || [];
+        
+        if (keyIndex < 0 || keyIndex >= keys.length) {
+          return res.status(400).json({ error: 'Invalid key index' });
+        }
+        
+        return res.json({ key: keys[keyIndex] });
+      }
     }
 
-    return res.status(400).json({ error: 'Invalid request' });
+    return res.status(400).json({ error: `Invalid request: method=${req.method}, action=${req.body?.action || 'none'}` });
   } catch (error) {
     console.error('Auth error:', error);
     return res.status(500).json({ error: error.message });

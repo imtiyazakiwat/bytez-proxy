@@ -25,6 +25,7 @@ const authHandler = (await import('./api/auth.js')).default;
 const usageHandler = (await import('./api/usage.js')).default;
 const adminHandler = (await import('./api/admin.js')).default;
 const imagesHandler = (await import('./api/images.js')).default;
+const puterUsageHandler = (await import('./api/puter-usage.js')).default;
 
 // API routes
 app.post('/v1/chat/completions', chatHandler);
@@ -35,6 +36,7 @@ app.all('/api/auth', authHandler);
 app.all('/api/models', modelsHandler);
 app.all('/api/usage', usageHandler);
 app.all('/api/admin', adminHandler);
+app.all('/api/puter-usage', puterUsageHandler);
 
 // Serve static files
 app.use(express.static(join(__dirname, 'dist')));

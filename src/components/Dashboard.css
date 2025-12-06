@@ -1019,3 +1019,379 @@
   padding: 0.375rem 0.75rem;
   font-size: 0.8125rem;
 }
+
+/* Puter Usage Tab Styles */
+.usage-progress-section {
+  padding: 1rem;
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+}
+
+.usage-progress-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.9rem;
+  margin-bottom: 0.5rem;
+}
+
+.usage-progress-footer {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.8rem;
+  opacity: 0.7;
+  margin-top: 0.25rem;
+}
+
+.usage-breakdown {
+  border-top: 1px solid var(--border);
+  padding-top: 1rem;
+}
+
+.usage-table {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.usage-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 1rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  align-items: center;
+}
+
+.usage-service {
+  font-family: monospace;
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-count {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+.usage-cost {
+  font-weight: 600;
+  color: var(--accent);
+  min-width: 70px;
+  text-align: right;
+}
+
+.status-badge.error {
+  background: var(--error);
+  color: white;
+}
+
+.status-badge.active {
+  background: var(--success);
+  color: white;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+/* Nav item as anchor */
+a.nav-item {
+  text-decoration: none;
+  cursor: pointer;
+}
+
+/* Page Header */
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.page-header h1 {
+  margin: 0;
+}
+
+/* Usage Filter Tabs */
+.usage-filter-tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.usage-filter-tabs .filter-tab {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  border: none;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.usage-filter-tabs .filter-tab:hover {
+  background: var(--bg-secondary);
+}
+
+.usage-filter-tabs .filter-tab.active {
+  background: var(--primary);
+  color: white;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.dot.green { background: var(--success); }
+.dot.red { background: var(--error); }
+
+/* Keys Usage List */
+.keys-usage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.key-usage-item {
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.key-usage-item.exhausted {
+  opacity: 0.7;
+}
+
+.key-usage-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.key-usage-header:hover {
+  background: var(--bg-secondary);
+}
+
+.key-info {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot.green { background: var(--success); }
+.status-dot.red { background: var(--error); }
+
+.key-preview {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.error-badge {
+  font-size: 0.7rem;
+  padding: 0.15rem 0.4rem;
+  background: var(--error);
+  color: white;
+  border-radius: 4px;
+}
+
+.key-stats {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.key-used {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.key-separator {
+  color: var(--text-secondary);
+}
+
+.key-allowance {
+  color: var(--text-secondary);
+}
+
+.key-remaining {
+  color: var(--success);
+  font-size: 0.8rem;
+}
+
+.key-remaining.exhausted {
+  color: var(--error);
+}
+
+.expand-icon {
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+  margin-left: 0.5rem;
+}
+
+.key-progress {
+  height: 3px;
+  background: var(--bg-secondary);
+}
+
+.key-progress-bar {
+  height: 100%;
+  transition: width 0.3s;
+}
+
+/* Key Breakdown */
+.key-breakdown {
+  padding: 1rem;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+}
+
+.breakdown-header {
+  font-size: 0.8rem;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.breakdown-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.breakdown-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 1rem;
+  padding: 0.4rem 0.5rem;
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+  font-size: 0.8rem;
+  align-items: center;
+}
+
+.breakdown-service {
+  font-family: monospace;
+  font-size: 0.75rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+
+.breakdown-count {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.breakdown-cost {
+  font-weight: 600;
+  color: var(--accent);
+  min-width: 60px;
+  text-align: right;
+}
+
+/* Key Usage Info (when adding key) */
+.key-usage-info {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.key-usage-row {
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+  color: var(--text-secondary);
+}
+
+.key-usage-stats {
+  display: flex;
+  gap: 1.5rem;
+}
+
+.key-usage-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.key-usage-stat .label {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+}
+
+.key-usage-stat .value {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.key-usage-stat .value.exhausted {
+  color: var(--error);
+}
+
+/* Token cost in recent activity */
+.token-cost {
+  color: var(--accent);
+  font-size: 0.8rem;
+}
+
+.token-count {
+  color: var(--text-secondary);
+}
+
+/* Ghost button */
+.btn-ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  border: none;
+}
+
+.btn-ghost:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+/* Warning badge */
+.warning-badge {
+  font-size: 0.7rem;
+  padding: 0.15rem 0.4rem;
+  background: var(--warning, #f59e0b);
+  color: white;
+  border-radius: 4px;
+  margin-left: 0.5rem;
+}
