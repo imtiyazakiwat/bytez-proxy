@@ -427,6 +427,9 @@ function getThinkingModel(modelId) {
   return null;
 }
 
+// Timeout for API calls - thinking models need longer timeouts
+const API_TIMEOUT_MS = 120000; // 120 seconds for thinking models
+
 async function callPuter(messages, modelId, puterToken, options = {}) {
   const hasTools = !!(options.tools && options.tools.length > 0);
   let { driver, model } = getDriverAndModel(modelId, hasTools);
@@ -464,33 +467,47 @@ async function callPuter(messages, modelId, puterToken, options = {}) {
 
   console.log(`[Puter] Non-streaming request to ${driver} with model ${model}`);
 
-  const response = await fetch(PUTER_BASE_URL, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${puterToken}`,
-      'Content-Type': 'application/json',
-      'Origin': 'https://puter.com',
-    },
-    body: JSON.stringify({
-      interface: 'puter-chat-completion',
-      driver,
-      method: 'complete',
-      args,
-    }),
-  });
+  // Use AbortController for timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
 
-  const data = await response.json();
-  
-  // DEBUG: Log raw Puter response to see reasoning structure
-  console.log('[Puter DEBUG] Raw response:', JSON.stringify(data, null, 2).substring(0, 3000));
-  
-  if (!data.success) {
-    const errorMsg = data.error?.message || data.error || 'Puter API error';
-    const error = new Error(errorMsg);
-    error.isRateLimit = isRateLimitError(errorMsg);
-    throw error;
+  try {
+    const response = await fetch(PUTER_BASE_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${puterToken}`,
+        'Content-Type': 'application/json',
+        'Origin': 'https://puter.com',
+      },
+      body: JSON.stringify({
+        interface: 'puter-chat-completion',
+        driver,
+        method: 'complete',
+        args,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    const data = await response.json();
+    
+    // DEBUG: Log raw Puter response to see reasoning structure
+    console.log('[Puter DEBUG] Raw response:', JSON.stringify(data, null, 2).substring(0, 3000));
+    
+    if (!data.success) {
+      const errorMsg = data.error?.message || data.error || 'Puter API error';
+      const error = new Error(errorMsg);
+      error.isRateLimit = isRateLimitError(errorMsg);
+      throw error;
+    }
+    return data.result;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      throw new Error(`Request timeout after ${API_TIMEOUT_MS / 1000}s - thinking models may need more time`);
+    }
+    throw err;
   }
-  return data.result;
 }
 
 // Streaming version of callPuter - uses true streaming with readable stream
@@ -527,6 +544,10 @@ async function callPuterStream(messages, modelId, puterToken, options = {}, onCh
 
   console.log(`[Puter] Streaming request to ${driver} with model ${model}`);
 
+  // Use AbortController for timeout (longer for streaming)
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS * 2); // 240s for streaming
+
   const response = await fetch(PUTER_BASE_URL, {
     method: 'POST',
     headers: {
@@ -540,7 +561,9 @@ async function callPuterStream(messages, modelId, puterToken, options = {}, onCh
       method: 'complete',
       args,
     }),
+    signal: controller.signal,
   });
+  clearTimeout(timeoutId); // Clear once we get initial response
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -1018,7 +1041,8 @@ export default async function handler(req, res) {
         const requestOptions = { temperature, max_tokens, tools, tool_choice, thinking_budget };
         
         if (stream) {
-          return handleStreamWithToken(res, messages, model, puterToken, requestOptions, user, provider);
+          // For streaming with Puter token, we need special handling for fallback
+          return handleStreamWithTokenAndFallback(res, messages, model, puterToken, requestOptions, user, provider);
         }
         
         const result = await callPuter(messages, model, puterToken, requestOptions);
@@ -1032,12 +1056,39 @@ export default async function handler(req, res) {
         return res.json(openAIResponse);
       } catch (puterError) {
         console.error(`[Puter Token] Direct token failed: ${puterError.message}`);
-        // If we don't have a real user (only Puter token), fail here
-        if (user.id === 'puter-direct') {
-          return res.status(500).json({ error: { message: `Puter token error: ${puterError.message}` } });
+        // Fall back to system keys for any error (invalid, rate limited, usage limited, etc.)
+        console.log('[Puter Token] Falling back to system keys...');
+        
+        // Get system keys for fallback
+        let systemKeys = await getSystemKeys();
+        if (systemKeys.length === 0 && process.env.PUTER_API_KEY) {
+          systemKeys = [process.env.PUTER_API_KEY];
         }
-        // Otherwise fall through to use our key system
-        console.log('[Puter Token] Falling back to system/user keys...');
+        
+        if (systemKeys.length === 0) {
+          return res.status(500).json({ error: { message: `Puter token error: ${puterError.message}. No system keys available for fallback.` } });
+        }
+        
+        // Try with system keys
+        try {
+          const requestOptions = { temperature, max_tokens, tools, tool_choice, thinking_budget };
+          
+          if (stream) {
+            return handleStream(res, messages, model, [], systemKeys, requestOptions, user, provider);
+          }
+          
+          const { result } = await callPuterWithRotation(messages, model, [], systemKeys, requestOptions);
+          const openAIResponse = puterToOpenAI(result, model);
+          
+          if (user.id !== 'puter-direct') {
+            await logUsage(user.id, model, openAIResponse.usage, provider, true, null, 'system-fallback');
+          }
+          
+          return res.json(openAIResponse);
+        } catch (fallbackError) {
+          console.error(`[Puter Token Fallback] System keys also failed: ${fallbackError.message}`);
+          return res.status(500).json({ error: { message: `Both Puter token and system keys failed. Original: ${puterError.message}. Fallback: ${fallbackError.message}` } });
+        }
       }
     }
 
@@ -1454,5 +1505,294 @@ async function handleStreamWithToken(res, messages, model, puterToken, options =
     }
     res.write(`data: ${JSON.stringify({ error: { message: error.message } })}\n\n`);
     res.end();
+  }
+}
+
+// Streaming handler for direct Puter token with automatic fallback to system keys
+async function handleStreamWithTokenAndFallback(res, messages, model, puterToken, options = {}, user, provider) {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  const id = `chatcmpl-${Date.now()}`;
+  const created = Math.floor(Date.now() / 1000);
+  
+  let totalContent = '';
+  let totalReasoning = '';
+  let toolCalls = [];
+  let toolCallIndex = 0;
+  let streamStarted = false;
+
+  try {
+    // Send initial role chunk
+    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+    streamStarted = true;
+
+    let insideThinkTag = false;
+    let tagBuffer = '';
+
+    await callPuterStream(messages, model, puterToken, options, (chunk) => {
+      if (chunk.type === 'text' && chunk.text) {
+        let text = tagBuffer + chunk.text;
+        tagBuffer = '';
+        
+        while (text.length > 0) {
+          if (!insideThinkTag) {
+            const thinkStart = text.indexOf('<think>');
+            if (thinkStart !== -1) {
+              const beforeThink = text.substring(0, thinkStart);
+              if (beforeThink) {
+                totalContent += beforeThink;
+                res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: beforeThink }, finish_reason: null }] })}\n\n`);
+              }
+              insideThinkTag = true;
+              text = text.substring(thinkStart + 7);
+            } else {
+              let partialMatch = '';
+              for (let len = Math.min(6, text.length); len > 0; len--) {
+                const suffix = text.substring(text.length - len);
+                if ('<think>'.startsWith(suffix)) { partialMatch = suffix; break; }
+              }
+              if (partialMatch) {
+                const toSend = text.substring(0, text.length - partialMatch.length);
+                if (toSend) {
+                  totalContent += toSend;
+                  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: toSend }, finish_reason: null }] })}\n\n`);
+                }
+                tagBuffer = partialMatch;
+              } else {
+                totalContent += text;
+                res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: text }, finish_reason: null }] })}\n\n`);
+              }
+              text = '';
+            }
+          } else {
+            const thinkEnd = text.indexOf('</think>');
+            if (thinkEnd !== -1) {
+              const thinkContent = text.substring(0, thinkEnd);
+              if (thinkContent) {
+                totalReasoning += thinkContent;
+                res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { reasoning_content: thinkContent }, finish_reason: null }] })}\n\n`);
+              }
+              insideThinkTag = false;
+              text = text.substring(thinkEnd + 8);
+            } else {
+              let partialMatch = '';
+              for (let len = Math.min(7, text.length); len > 0; len--) {
+                const suffix = text.substring(text.length - len);
+                if ('</think>'.startsWith(suffix)) { partialMatch = suffix; break; }
+              }
+              if (partialMatch) {
+                const toSend = text.substring(0, text.length - partialMatch.length);
+                if (toSend) {
+                  totalReasoning += toSend;
+                  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { reasoning_content: toSend }, finish_reason: null }] })}\n\n`);
+                }
+                tagBuffer = partialMatch;
+              } else {
+                totalReasoning += text;
+                res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { reasoning_content: text }, finish_reason: null }] })}\n\n`);
+              }
+              text = '';
+            }
+          }
+        }
+      } else if (chunk.type === 'reasoning' && chunk.text) {
+        totalReasoning += chunk.text;
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { reasoning_content: chunk.text }, finish_reason: null }] })}\n\n`);
+      } else if (chunk.type === 'tool_use') {
+        const toolCall = { index: toolCallIndex, id: chunk.id, type: 'function', function: { name: chunk.name, arguments: chunk.arguments } };
+        toolCalls.push(toolCall);
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { tool_calls: [toolCall] }, finish_reason: null }] })}\n\n`);
+        toolCallIndex++;
+      } else if (chunk.message?.content) {
+        const content = removeThinkTags(chunk.message.content);
+        totalContent = content;
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`);
+      }
+    });
+    
+    const finishReason = toolCalls.length > 0 ? 'tool_calls' : 'stop';
+    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) } })}\n\n`);
+    res.write('data: [DONE]\n\n');
+    res.end();
+    
+    if (user.id !== 'puter-direct') {
+      await logUsage(user.id, model, { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) }, provider, true, null, 'puter-token');
+    }
+  } catch (error) {
+    console.error(`[Stream Puter Token] Failed:`, error.message);
+    console.log('[Stream Puter Token] Attempting fallback to system keys...');
+    
+    // Get system keys for fallback
+    let systemKeys = await getSystemKeys();
+    if (systemKeys.length === 0 && process.env.PUTER_API_KEY) {
+      systemKeys = [process.env.PUTER_API_KEY];
+    }
+    
+    if (systemKeys.length === 0) {
+      if (user.id !== 'puter-direct') {
+        await logUsage(user.id, model, null, provider, false, error.message);
+      }
+      if (!streamStarted) {
+        res.write(`data: ${JSON.stringify({ error: { message: `Puter token failed: ${error.message}. No system keys for fallback.` } })}\n\n`);
+      } else {
+        res.write(`data: ${JSON.stringify({ error: { message: error.message } })}\n\n`);
+      }
+      res.end();
+      return;
+    }
+    
+    // If stream already started with content, we can't cleanly fallback - just error
+    if (totalContent.length > 0 || totalReasoning.length > 0) {
+      if (user.id !== 'puter-direct') {
+        await logUsage(user.id, model, null, provider, false, error.message);
+      }
+      res.write(`data: ${JSON.stringify({ error: { message: `Stream interrupted: ${error.message}` } })}\n\n`);
+      res.end();
+      return;
+    }
+    
+    // Fallback to system keys - use the regular handleStream which handles key rotation
+    console.log('[Stream Puter Token] Falling back to system keys for streaming...');
+    
+    // Note: We already sent the initial role chunk, so handleStream will handle the rest
+    // We need to continue the stream, not start a new one
+    await keyPool.loadDailyBlockedFromDB();
+    
+    let fallbackSuccess = false;
+    let lastFallbackError = null;
+    let startIndex = 0;
+    
+    for (let attempt = 0; attempt < systemKeys.length && !fallbackSuccess; attempt++) {
+      const keyResult = keyPool.getAvailableKey(systemKeys, startIndex);
+      if (!keyResult) break;
+      
+      const usedKey = keyResult.key;
+      startIndex = keyResult.index + 1;
+      console.log(`[Stream Fallback] Attempt ${attempt + 1}: Using system key index ${keyResult.index}`);
+      
+      totalContent = '';
+      totalReasoning = '';
+      toolCalls = [];
+      toolCallIndex = 0;
+      
+      try {
+        let insideThinkTag = false;
+        let tagBuffer = '';
+        
+        await callPuterStream(messages, model, usedKey, options, (chunk) => {
+          if (chunk.type === 'text' && chunk.text) {
+            let text = tagBuffer + chunk.text;
+            tagBuffer = '';
+            
+            while (text.length > 0) {
+              if (!insideThinkTag) {
+                const thinkStart = text.indexOf('<think>');
+                if (thinkStart !== -1) {
+                  const beforeThink = text.substring(0, thinkStart);
+                  if (beforeThink) {
+                    totalContent += beforeThink;
+                    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: beforeThink }, finish_reason: null }] })}\n\n`);
+                  }
+                  insideThinkTag = true;
+                  text = text.substring(thinkStart + 7);
+                } else {
+                  let partialMatch = '';
+                  for (let len = Math.min(6, text.length); len > 0; len--) {
+                    const suffix = text.substring(text.length - len);
+                    if ('<think>'.startsWith(suffix)) { partialMatch = suffix; break; }
+                  }
+                  if (partialMatch) {
+                    const toSend = text.substring(0, text.length - partialMatch.length);
+                    if (toSend) {
+                      totalContent += toSend;
+                      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: toSend }, finish_reason: null }] })}\n\n`);
+                    }
+                    tagBuffer = partialMatch;
+                  } else {
+                    totalContent += text;
+                    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: text }, finish_reason: null }] })}\n\n`);
+                  }
+                  text = '';
+                }
+              } else {
+                const thinkEnd = text.indexOf('</think>');
+                if (thinkEnd !== -1) {
+                  const thinkContent = text.substring(0, thinkEnd);
+                  if (thinkContent) {
+                    totalReasoning += thinkContent;
+                    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { reasoning_content: thinkContent }, finish_reason: null }] })}\n\n`);
+                  }
+                  insideThinkTag = false;
+                  text = text.substring(thinkEnd + 8);
+                } else {
+                  let partialMatch = '';
+                  for (let len = Math.min(7, text.length); len > 0; len--) {
+                    const suffix = text.substring(text.length - len);
+                    if ('</think>'.startsWith(suffix)) { partialMatch = suffix; break; }
+                  }
+                  if (partialMatch) {
+                    const toSend = text.substring(0, text.length - partialMatch.length);
+                    if (toSend) {
+                      totalReasoning += toSend;
+                      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { reasoning_content: toSend }, finish_reason: null }] })}\n\n`);
+                    }
+                    tagBuffer = partialMatch;
+                  } else {
+                    totalReasoning += text;
+                    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { reasoning_content: text }, finish_reason: null }] })}\n\n`);
+                  }
+                  text = '';
+                }
+              }
+            }
+          } else if (chunk.type === 'reasoning' && chunk.text) {
+            totalReasoning += chunk.text;
+            res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { reasoning_content: chunk.text }, finish_reason: null }] })}\n\n`);
+          } else if (chunk.type === 'tool_use') {
+            const toolCall = { index: toolCallIndex, id: chunk.id, type: 'function', function: { name: chunk.name, arguments: chunk.arguments } };
+            toolCalls.push(toolCall);
+            res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { tool_calls: [toolCall] }, finish_reason: null }] })}\n\n`);
+            toolCallIndex++;
+          } else if (chunk.message?.content) {
+            const content = removeThinkTags(chunk.message.content);
+            totalContent = content;
+            res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`);
+          }
+        });
+        
+        fallbackSuccess = true;
+        
+        const finishReason = toolCalls.length > 0 ? 'tool_calls' : 'stop';
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) } })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+        
+        if (user.id !== 'puter-direct') {
+          await logUsage(user.id, model, { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) }, provider, true, null, 'system-fallback');
+        }
+      } catch (fallbackError) {
+        lastFallbackError = fallbackError;
+        console.error(`[Stream Fallback] Key failed:`, fallbackError.message);
+        
+        if (isRateLimitError(fallbackError.message)) {
+          markKeyFailed(usedKey);
+          if (isUsageLimitedError(fallbackError.message)) {
+            await markKeyUsageLimited(usedKey);
+          }
+          continue;
+        }
+        break;
+      }
+    }
+    
+    if (!fallbackSuccess) {
+      if (user.id !== 'puter-direct') {
+        await logUsage(user.id, model, null, provider, false, lastFallbackError?.message || 'All fallback keys failed');
+      }
+      res.write(`data: ${JSON.stringify({ error: { message: lastFallbackError?.message || 'All system keys failed after Puter token failure' } })}\n\n`);
+      res.end();
+    }
   }
 }

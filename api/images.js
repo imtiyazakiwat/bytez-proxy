@@ -597,10 +597,75 @@ export default async function handler(req, res) {
         return res.json(responseData);
       } catch (puterError) {
         console.error(`[Image Puter Token] Direct token failed: ${puterError.message}`);
-        if (user.id === 'puter-direct') {
-          return res.status(500).json({ error: { message: `Puter token error: ${puterError.message}` } });
+        // Fall back to system keys for any error (invalid, rate limited, usage limited, etc.)
+        console.log('[Image Puter Token] Falling back to system keys...');
+        
+        // Get system keys for fallback
+        let systemKeys = await getSystemKeys();
+        if (systemKeys.length === 0 && process.env.PUTER_API_KEY) {
+          systemKeys = [process.env.PUTER_API_KEY];
         }
-        console.log('[Image Puter Token] Falling back to system/user keys...');
+        
+        if (systemKeys.length === 0) {
+          return res.status(500).json({ error: { message: `Puter token error: ${puterError.message}. No system keys available for fallback.` } });
+        }
+        
+        // Try with system keys using key rotation
+        let lastFallbackError = null;
+        let keyIndex = Math.floor(Math.random() * systemKeys.length);
+        let triedCount = 0;
+        
+        while (triedCount < systemKeys.length) {
+          const keyResult = imageKeyPool.getAvailableKey(systemKeys, keyIndex);
+          if (!keyResult) {
+            console.log('[Image Puter Token Fallback] No available system keys in pool');
+            break;
+          }
+          
+          const key = keyResult.key;
+          keyIndex = (keyResult.index + 1) % systemKeys.length;
+          triedCount++;
+          
+          try {
+            let result;
+            if (useOpenRouterDirectly) {
+              result = await callOpenRouterImageGeneration(prompt, model, key, options);
+            } else {
+              result = await callPuterImageGeneration(prompt, model, key, options);
+            }
+            
+            if (user.id !== 'puter-direct') {
+              await logImageUsage(user.id, model + ' (fallback)', isImg2Img ? 'img2img' : 'txt2img', true);
+            }
+            
+            const responseData = { created: Math.floor(Date.now() / 1000), data: result.data || [] };
+            if (response_format === 'url' && responseData.data[0]?.b64_json) {
+              responseData.data = responseData.data.map(d => ({
+                url: `data:${d.mime_type || 'image/png'};base64,${d.b64_json}`,
+                revised_prompt: d.revised_prompt,
+              }));
+            }
+            return res.json(responseData);
+          } catch (fallbackError) {
+            lastFallbackError = fallbackError;
+            const msg = fallbackError.message || '';
+            console.error(`[Image Puter Token Fallback] System key failed:`, msg);
+            
+            if (msg.includes('rate') || msg.includes('limit') || msg.includes('429') || msg.includes('too many')) {
+              imageKeyPool.markTempFailed(key);
+            } else if (msg.includes('usage-limited') || msg.includes('daily') || msg.includes('quota')) {
+              imageKeyPool.markDailyLimited(key);
+            }
+            continue;
+          }
+        }
+        
+        // All fallback attempts failed
+        return res.status(500).json({ 
+          error: { 
+            message: `Both Puter token and system keys failed. Original: ${puterError.message}. Fallback: ${lastFallbackError?.message || 'All system keys exhausted'}` 
+          } 
+        });
       }
     }
 

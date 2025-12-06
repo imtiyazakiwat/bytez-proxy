@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { auth } from '../firebase';
 import { 
   Key, LogOut, Zap, Activity, Settings, 
-  BarChart3, Code, BookOpen, Image, PieChart, UserPlus 
+  BarChart3, Code, BookOpen, Image, PieChart, UserPlus, Menu, X 
 } from 'lucide-react';
 import NavItem from './ui/NavItem';
 import OverviewPage from '../pages/OverviewPage';
@@ -30,6 +30,7 @@ export default function Dashboard({ user, onSignOut }) {
   const [models, setModels] = useState([]);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const isAdmin = ADMIN_USER_IDS.includes(user.uid);
 
   useEffect(() => {
@@ -41,6 +42,7 @@ export default function Dashboard({ user, onSignOut }) {
   const changeTab = (tab) => {
     window.location.hash = tab;
     setActiveTab(tab);
+    setMobileMenuOpen(false);
   };
 
   useEffect(() => {
@@ -90,7 +92,21 @@ export default function Dashboard({ user, onSignOut }) {
 
   return (
     <div className="dashboard">
-      <aside className="sidebar">
+      {/* Mobile Header */}
+      <header className="mobile-header">
+        <div className="mobile-header-left">
+          <Zap size={20} />
+          <span>UnifiedAI</span>
+        </div>
+        <button className="btn-icon" onClick={() => setMobileMenuOpen(!mobileMenuOpen)}>
+          {mobileMenuOpen ? <X size={24} /> : <Menu size={24} />}
+        </button>
+      </header>
+
+      {/* Mobile Menu Overlay */}
+      {mobileMenuOpen && <div className="mobile-overlay" onClick={() => setMobileMenuOpen(false)} />}
+
+      <aside className={`sidebar ${mobileMenuOpen ? 'mobile-open' : ''}`}>
         <div className="sidebar-header">
           <Zap size={24} />
           <span>UnifiedAI</span>
