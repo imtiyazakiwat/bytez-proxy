@@ -20,13 +20,60 @@ import { createHash } from 'crypto';
 // Instead of checking each key, maintain a ready pool of available keys
 // and a blocked set for failed keys. All operations are O(1).
 
+// Puter API for checking key usage
+const PUTER_API_BASE = 'https://api.puter.com';
+
+// Check if a Puter key is active (has remaining allowance)
+async function checkPuterKeyActive(key) {
+  const origins = ['https://puter.com', 'https://g4f.dev', 'https://api.puter.com'];
+  
+  for (const origin of origins) {
+    try {
+      const [whoamiRes, usageRes] = await Promise.all([
+        fetch(`${PUTER_API_BASE}/whoami`, {
+          headers: { 'Authorization': `Bearer ${key}`, 'Origin': origin }
+        }),
+        fetch(`${PUTER_API_BASE}/metering/usage`, {
+          headers: { 'Authorization': `Bearer ${key}`, 'Origin': origin }
+        })
+      ]);
+      
+      const whoami = await whoamiRes.json();
+      const usageData = await usageRes.json();
+      
+      if (whoami.username || whoami.uuid) {
+        const remaining = usageData.allowanceInfo?.remaining || 0;
+        const isActive = remaining > 0;
+        return { 
+          valid: true, 
+          active: isActive,
+          remaining,
+          username: whoami.username,
+          isTemp: whoami.is_temp
+        };
+      }
+    } catch (e) {
+      continue;
+    }
+  }
+  
+  return { valid: false, active: false, remaining: 0 };
+}
+
 class KeyPoolManager {
   constructor() {
     this.blockedKeys = new Map(); // hash -> { until: timestamp, reason: string }
-    this.dailyBlockedHashes = new Set(); // hashes blocked for the day
-    this.currentDate = null;
+    this.monthlyBlockedHashes = new Set(); // hashes blocked for the month
+    this.currentMonth = null;
     this.dbCacheLoaded = false;
     this.SHORT_COOLDOWN_MS = 5 * 60 * 1000; // 5 min for temp failures
+    this.keyStatusCache = new Map(); // hash -> { active: boolean, checkedAt: timestamp }
+    this.KEY_STATUS_CACHE_MS = 10 * 60 * 1000; // Cache key status for 10 minutes
+    
+    // Pre-filtered active keys pool
+    this.activeKeysPool = new Map(); // poolId -> { keys: [], lastRefresh: timestamp }
+    this.POOL_REFRESH_MS = 10 * 60 * 1000; // Refresh pool every 10 minutes
+    this.poolRefreshInProgress = new Map(); // poolId -> Promise (to prevent concurrent refreshes)
   }
 
   // O(1) hash computation (cached per key instance via Map)
@@ -34,13 +81,23 @@ class KeyPoolManager {
     return createHash('sha256').update(key).digest('hex').substring(0, 16);
   }
 
-  // Reset daily blocks at midnight
-  checkDateReset() {
-    const today = new Date().toISOString().split('T')[0];
-    if (this.currentDate !== today) {
-      this.dailyBlockedHashes.clear();
-      this.currentDate = today;
+  // Generate pool ID from keys array
+  getPoolId(keys) {
+    if (!keys || keys.length === 0) return 'empty';
+    // Use first and last key hash + length for quick ID
+    return `${this.hashKey(keys[0])}_${this.hashKey(keys[keys.length - 1])}_${keys.length}`;
+  }
+
+  // Reset monthly blocks at start of new month
+  checkMonthReset() {
+    const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
+    if (this.currentMonth !== currentMonth) {
+      this.monthlyBlockedHashes.clear();
+      this.keyStatusCache.clear();
+      this.activeKeysPool.clear(); // Clear active pools on month change
+      this.currentMonth = currentMonth;
       this.dbCacheLoaded = false;
+      console.log(`[KeyPool] Month reset: ${currentMonth}`);
     }
   }
 
@@ -54,29 +111,51 @@ class KeyPoolManager {
     console.log(`[KeyPool] Temp blocked: ${hash} for ${this.SHORT_COOLDOWN_MS/1000}s`);
   }
 
-  // O(1) - Mark key as usage-limited for the day
-  async markDailyLimited(key) {
-    this.checkDateReset();
+  // O(1) - Mark key as usage-limited for the month
+  async markMonthlyLimited(key) {
+    this.checkMonthReset();
     const hash = this.hashKey(key);
-    this.dailyBlockedHashes.add(hash);
-    console.log(`[KeyPool] Daily blocked: ${hash}`);
+    this.monthlyBlockedHashes.add(hash);
+    
+    // Remove from all active pools
+    for (const [poolId, pool] of this.activeKeysPool) {
+      pool.keys = pool.keys.filter(k => this.hashKey(k) !== hash);
+    }
+    
+    console.log(`[KeyPool] Monthly blocked: ${hash}`);
 
     // Persist to DB (fire and forget for speed)
     if (db) {
-      const today = new Date().toISOString().split('T')[0];
-      db.collection('failed_keys').doc(today).set({
+      const currentMonth = new Date().toISOString().slice(0, 7);
+      db.collection('failed_keys').doc(currentMonth).set({
         [hash]: { failedAt: new Date().toISOString(), reason: 'usage-limited' }
       }, { merge: true }).catch(e => console.error('DB persist error:', e.message));
     }
   }
 
-  // O(1) - Check if a specific key is available
+  // Check if key status is cached and still valid
+  getCachedKeyStatus(key) {
+    const hash = this.hashKey(key);
+    const cached = this.keyStatusCache.get(hash);
+    if (cached && Date.now() - cached.checkedAt < this.KEY_STATUS_CACHE_MS) {
+      return cached;
+    }
+    return null;
+  }
+
+  // Cache key status
+  setCachedKeyStatus(key, active, remaining = 0) {
+    const hash = this.hashKey(key);
+    this.keyStatusCache.set(hash, { active, remaining, checkedAt: Date.now() });
+  }
+
+  // O(1) - Check if a specific key is available (sync check only)
   isKeyAvailable(key) {
-    this.checkDateReset();
+    this.checkMonthReset();
     const hash = this.hashKey(key);
 
-    // Check daily block
-    if (this.dailyBlockedHashes.has(hash)) return false;
+    // Check monthly block
+    if (this.monthlyBlockedHashes.has(hash)) return false;
 
     // Check temp block
     const block = this.blockedKeys.get(hash);
@@ -85,7 +164,99 @@ class KeyPoolManager {
       this.blockedKeys.delete(hash); // Expired, remove
     }
 
+    // Check cached status - if we know it's inactive, skip it
+    const cached = this.keyStatusCache.get(hash);
+    if (cached && Date.now() - cached.checkedAt < this.KEY_STATUS_CACHE_MS) {
+      if (!cached.active) return false;
+    }
+
     return true;
+  }
+
+  // Batch validate all keys in parallel - returns only active keys
+  async batchValidateKeys(keys) {
+    if (!keys || keys.length === 0) return [];
+    
+    const startTime = Date.now();
+    console.log(`[KeyPool] Batch validating ${keys.length} keys in parallel...`);
+    
+    // Filter out already blocked keys first (sync)
+    const candidateKeys = keys.filter(key => this.isKeyAvailable(key));
+    console.log(`[KeyPool] ${candidateKeys.length} keys passed sync check`);
+    
+    if (candidateKeys.length === 0) return [];
+    
+    // Check all candidates in parallel
+    const results = await Promise.all(
+      candidateKeys.map(async (key) => {
+        const cached = this.getCachedKeyStatus(key);
+        if (cached) {
+          return { key, active: cached.active, remaining: cached.remaining };
+        }
+        
+        try {
+          const status = await checkPuterKeyActive(key);
+          this.setCachedKeyStatus(key, status.active, status.remaining);
+          
+          if (!status.valid || !status.active) {
+            if (!status.active) {
+              // Don't await - fire and forget for speed
+              this.markMonthlyLimited(key).catch(() => {});
+            }
+            return { key, active: false, remaining: 0 };
+          }
+          
+          return { key, active: true, remaining: status.remaining };
+        } catch (e) {
+          // On error, assume key might be available
+          return { key, active: true, remaining: -1 };
+        }
+      })
+    );
+    
+    // Filter to only active keys, sorted by remaining allowance (highest first)
+    const activeKeys = results
+      .filter(r => r.active)
+      .sort((a, b) => b.remaining - a.remaining)
+      .map(r => r.key);
+    
+    const elapsed = Date.now() - startTime;
+    console.log(`[KeyPool] Batch validation complete: ${activeKeys.length}/${keys.length} active keys (${elapsed}ms)`);
+    
+    return activeKeys;
+  }
+
+  // Get or refresh the active keys pool
+  async getActiveKeysPool(keys) {
+    if (!keys || keys.length === 0) return [];
+    
+    const poolId = this.getPoolId(keys);
+    const pool = this.activeKeysPool.get(poolId);
+    
+    // Check if pool exists and is fresh
+    if (pool && Date.now() - pool.lastRefresh < this.POOL_REFRESH_MS && pool.keys.length > 0) {
+      return pool.keys;
+    }
+    
+    // Check if refresh is already in progress
+    if (this.poolRefreshInProgress.has(poolId)) {
+      // Wait for existing refresh to complete
+      return await this.poolRefreshInProgress.get(poolId);
+    }
+    
+    // Start new refresh
+    const refreshPromise = (async () => {
+      try {
+        const activeKeys = await this.batchValidateKeys(keys);
+        this.activeKeysPool.set(poolId, { keys: activeKeys, lastRefresh: Date.now() });
+        return activeKeys;
+      } finally {
+        this.poolRefreshInProgress.delete(poolId);
+      }
+    })();
+    
+    this.poolRefreshInProgress.set(poolId, refreshPromise);
+    return await refreshPromise;
   }
 
   // O(1) amortized - Get first available key from array (uses index rotation)
@@ -102,19 +273,41 @@ class KeyPoolManager {
     return null;
   }
 
-  // Load daily blocked keys from DB (called once per day per server instance)
-  async loadDailyBlockedFromDB() {
+  // Fast O(1) key selection from pre-filtered pool
+  async getValidatedKey(keys, startIndex = 0) {
+    if (!keys || keys.length === 0) return null;
+    
+    // Get pre-filtered active keys pool
+    const activeKeys = await this.getActiveKeysPool(keys);
+    
+    if (activeKeys.length === 0) {
+      console.log('[KeyPool] No active keys available in pool');
+      return null;
+    }
+    
+    // Simple rotation within active pool
+    const idx = startIndex % activeKeys.length;
+    const key = activeKeys[idx];
+    
+    // Find original index for logging
+    const originalIdx = keys.indexOf(key);
+    
+    return { key, index: originalIdx !== -1 ? originalIdx : idx };
+  }
+
+  // Load monthly blocked keys from DB (called once per month per server instance)
+  async loadMonthlyBlockedFromDB() {
     if (this.dbCacheLoaded || !db) return;
     
-    this.checkDateReset();
-    const today = new Date().toISOString().split('T')[0];
+    this.checkMonthReset();
+    const currentMonth = new Date().toISOString().slice(0, 7);
     
     try {
-      const doc = await db.collection('failed_keys').doc(today).get();
+      const doc = await db.collection('failed_keys').doc(currentMonth).get();
       if (doc.exists) {
         const data = doc.data();
-        Object.keys(data).forEach(hash => this.dailyBlockedHashes.add(hash));
-        console.log(`[KeyPool] Loaded ${Object.keys(data).length} blocked keys from DB`);
+        Object.keys(data).forEach(hash => this.monthlyBlockedHashes.add(hash));
+        console.log(`[KeyPool] Loaded ${Object.keys(data).length} blocked keys from DB for ${currentMonth}`);
       }
       this.dbCacheLoaded = true;
     } catch (e) {
@@ -329,7 +522,7 @@ function markKeyFailed(key) {
 }
 
 async function markKeyUsageLimited(key) {
-  await keyPool.markDailyLimited(key);
+  await keyPool.markMonthlyLimited(key);
 }
 
 
@@ -339,13 +532,26 @@ async function logUsage(userId, model, usage, provider, success, errorMessage = 
   if (!db) return;
   
   try {
+    // Usage object now contains cost data from extractUsage()
+    const promptTokens = usage?.prompt_tokens || 0;
+    const completionTokens = usage?.completion_tokens || 0;
+    const totalTokens = usage?.total_tokens || (promptTokens + completionTokens);
+    
+    // Cost is in Puter units (1e8 = $1)
+    const promptCost = usage?.prompt_cost || 0;
+    const completionCost = usage?.completion_cost || 0;
+    const totalCost = usage?.total_cost || (promptCost + completionCost);
+    
     const logEntry = {
       userId,
       model,
       provider,
-      promptTokens: usage?.prompt_tokens || 0,
-      completionTokens: usage?.completion_tokens || 0,
-      totalTokens: usage?.total_tokens || 0,
+      promptTokens,
+      completionTokens,
+      totalTokens,
+      promptCost,
+      completionCost,
+      totalCost, // Cost in Puter units (1e8 = $1)
       success,
       errorMessage,
       keyType: keyUsed ? 'user' : 'system',
@@ -356,12 +562,13 @@ async function logUsage(userId, model, usage, provider, success, errorMessage = 
     await db.collection('usage_logs').add(logEntry);
     
     // Update user's total token counts
-    if (success && usage?.total_tokens > 0) {
+    if (success && totalTokens > 0) {
       const userRef = db.collection('users').doc(userId);
       await userRef.update({
-        totalPromptTokens: FieldValue.increment(usage.prompt_tokens || 0),
-        totalCompletionTokens: FieldValue.increment(usage.completion_tokens || 0),
-        totalTokens: FieldValue.increment(usage.total_tokens || 0),
+        totalPromptTokens: FieldValue.increment(promptTokens),
+        totalCompletionTokens: FieldValue.increment(completionTokens),
+        totalTokens: FieldValue.increment(totalTokens),
+        totalCost: FieldValue.increment(totalCost),
         totalRequests: FieldValue.increment(1),
         lastRequestAt: new Date().toISOString(),
       });
@@ -384,7 +591,7 @@ function isRateLimitError(error) {
          errorMsg.includes('429');
 }
 
-// Check if error is specifically a daily usage limit (should be blocked for the day)
+// Check if error is specifically a usage limit (should be blocked for the month)
 function isUsageLimitedError(errorMsg) {
   const msg = (errorMsg || '').toLowerCase();
   return msg.includes('usage-limited') || 
@@ -670,18 +877,18 @@ async function callPuterWithRotation(messages, modelId, userKeys, systemKeys, op
     throw new Error('No API keys configured');
   }
 
-  // Load daily blocked keys from DB once per day (amortized O(1))
-  await keyPool.loadDailyBlockedFromDB();
+  // Load monthly blocked keys from DB once per month (amortized O(1))
+  await keyPool.loadMonthlyBlockedFromDB();
 
   let lastError = null;
   let usedKey = null;
   let startIndex = 0;
   
-  // O(1) per attempt - just get next available key
+  // Get validated key - checks usage before using
   for (let attempt = 0; attempt < allKeys.length; attempt++) {
-    const result = keyPool.getAvailableKey(allKeys, startIndex);
+    const result = await keyPool.getValidatedKey(allKeys, startIndex);
     if (!result) {
-      throw new Error('All API keys are temporarily unavailable due to rate limits. Please try again later.');
+      throw new Error('All API keys are temporarily unavailable due to rate limits or exhausted allowance. Please try again later.');
     }
     
     usedKey = result.key;
@@ -808,29 +1015,48 @@ function addThinkingSystemPrompt(messages, thinkingBudget) {
 function extractUsage(result) {
   const usage = result.usage;
   
+  // Puter/OpenRouter array format: [{type: "prompt", amount: X, cost: Y}, {type: "completion", ...}]
   if (Array.isArray(usage)) {
-    const prompt = usage.find(u => u.type === 'prompt')?.amount || 0;
-    const completion = usage.find(u => u.type === 'completion')?.amount || 0;
-    return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion };
+    const promptData = usage.find(u => u.type === 'prompt') || {};
+    const completionData = usage.find(u => u.type === 'completion') || {};
+    return { 
+      prompt_tokens: promptData.amount || 0, 
+      completion_tokens: completionData.amount || 0, 
+      total_tokens: (promptData.amount || 0) + (completionData.amount || 0),
+      // Preserve cost data for logging (in Puter units: 1e8 = $1)
+      prompt_cost: promptData.cost || 0,
+      completion_cost: completionData.cost || 0,
+      total_cost: (promptData.cost || 0) + (completionData.cost || 0),
+      _raw_usage: usage // Keep raw for debugging
+    };
   }
   
+  // Claude driver format: {input_tokens, output_tokens}
   if (usage?.input_tokens !== undefined) {
     return {
       prompt_tokens: usage.input_tokens || 0,
       completion_tokens: usage.output_tokens || 0,
       total_tokens: (usage.input_tokens || 0) + (usage.output_tokens || 0),
+      // Claude driver doesn't report cost, estimate based on typical rates
+      prompt_cost: 0,
+      completion_cost: 0,
+      total_cost: 0
     };
   }
   
+  // Standard OpenAI format
   if (usage?.prompt_tokens !== undefined) {
     return {
       prompt_tokens: usage.prompt_tokens || 0,
       completion_tokens: usage.completion_tokens || 0,
       total_tokens: usage.total_tokens || (usage.prompt_tokens || 0) + (usage.completion_tokens || 0),
+      prompt_cost: 0,
+      completion_cost: 0,
+      total_cost: 0
     };
   }
   
-  return { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  return { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, prompt_cost: 0, completion_cost: 0, total_cost: 0 };
 }
 
 function getProvider(modelId) {
@@ -1169,8 +1395,8 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
     return;
   }
 
-  // Load daily blocked keys from DB once per day (amortized O(1))
-  await keyPool.loadDailyBlockedFromDB();
+  // Load monthly blocked keys from DB once per month (amortized O(1))
+  await keyPool.loadMonthlyBlockedFromDB();
 
   console.log(`[Stream] User has ${userKeys?.length || 0} personal keys, ${systemKeys?.length || 0} system keys. Using: ${hasUserKeys ? 'USER' : 'SYSTEM'} keys`);
 
@@ -1181,11 +1407,11 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
   let success = false;
   let startIndex = 0;
 
-  // O(1) per attempt - just get next available key
+  // Get validated key - checks usage before using
   for (let attempt = 0; attempt < allKeys.length && !success; attempt++) {
-    const keyResult = keyPool.getAvailableKey(allKeys, startIndex);
+    const keyResult = await keyPool.getValidatedKey(allKeys, startIndex);
     if (!keyResult) {
-      res.write(`data: ${JSON.stringify({ error: { message: 'All API keys are temporarily unavailable due to rate limits. Please try again later.' } })}\n\n`);
+      res.write(`data: ${JSON.stringify({ error: { message: 'All API keys are temporarily unavailable due to rate limits or exhausted allowance. Please try again later.' } })}\n\n`);
       res.end();
       return;
     }
@@ -1658,14 +1884,14 @@ async function handleStreamWithTokenAndFallback(res, messages, model, puterToken
     
     // Note: We already sent the initial role chunk, so handleStream will handle the rest
     // We need to continue the stream, not start a new one
-    await keyPool.loadDailyBlockedFromDB();
+    await keyPool.loadMonthlyBlockedFromDB();
     
     let fallbackSuccess = false;
     let lastFallbackError = null;
     let startIndex = 0;
     
     for (let attempt = 0; attempt < systemKeys.length && !fallbackSuccess; attempt++) {
-      const keyResult = keyPool.getAvailableKey(systemKeys, startIndex);
+      const keyResult = await keyPool.getValidatedKey(systemKeys, startIndex);
       if (!keyResult) break;
       
       const usedKey = keyResult.key;

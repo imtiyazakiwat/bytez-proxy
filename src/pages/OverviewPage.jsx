@@ -1,31 +1,41 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { auth } from '../firebase';
-import { Zap, Shield, Activity, BarChart3, Copy, Check } from 'lucide-react';
+import { Zap, Shield, Activity, BarChart3, Copy, Check, RefreshCw } from 'lucide-react';
 import StatCard from '../components/ui/StatCard';
-import { formatNumber, estimateCost } from '../utils/format';
+import { formatNumber, estimateCost, formatLogCost } from '../utils/format';
 
 const API_URL = import.meta.env.VITE_API_URL || window.location.origin;
 
 export default function OverviewPage({ profile, copyApiKey, copied }) {
   const [usage, setUsage] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState(null);
 
-  useEffect(() => {
-    loadUsage();
-  }, []);
-
-  const loadUsage = async () => {
+  const loadUsage = useCallback(async (isManual = false) => {
+    if (isManual) setRefreshing(true);
     try {
       const token = await auth.currentUser.getIdToken();
       const res = await fetch('/api/usage', { headers: { Authorization: `Bearer ${token}` } });
       const data = await res.json();
-      if (!data.error) setUsage(data);
+      if (!data.error) {
+        setUsage(data);
+        setLastRefresh(new Date());
+      }
     } catch (e) {
       console.error('Failed to load usage:', e);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    loadUsage();
+    // Auto-refresh every 30 seconds
+    const interval = setInterval(() => loadUsage(), 30000);
+    return () => clearInterval(interval);
+  }, [loadUsage]);
 
   const dailyLimit = 15;
   const dailyUsed = usage?.dailyRequestsUsed || profile?.dailyRequestsUsed || 0;
@@ -98,15 +108,33 @@ export default function OverviewPage({ profile, copyApiKey, copied }) {
 
       {usage?.recentLogs?.length > 0 && (
         <div className="card">
-          <h3>Recent Activity</h3>
+          <div className="card-header" style={{ marginBottom: '1rem' }}>
+            <h3 style={{ margin: 0 }}>Recent Activity</h3>
+            <button 
+              className="btn btn-secondary btn-sm" 
+              onClick={() => loadUsage(true)} 
+              disabled={refreshing}
+              style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
+            >
+              <RefreshCw size={14} className={refreshing ? 'spin' : ''} />
+              {lastRefresh && <span style={{ marginLeft: '0.25rem', opacity: 0.7 }}>
+                {Math.round((Date.now() - lastRefresh) / 1000)}s ago
+              </span>}
+            </button>
+          </div>
           <div className="recent-logs">
             {usage.recentLogs.slice(0, 10).map((log, i) => (
               <div key={log.id || i} className={`log-entry ${log.success ? 'success' : 'error'}`}>
                 <div className="log-model">{log.model}</div>
                 <div className="log-tokens">
-                  {log.totalTokens > 0 ? (
-                    <><span className="token-count">{formatNumber(log.totalTokens)} tokens</span> <span className="token-cost">({estimateCost(log.totalTokens)})</span></>
-                  ) : (log.errorMessage || 'No tokens')}
+                  {log.success ? (
+                    <>
+                      <span className="token-count">{formatNumber(log.totalTokens)} tokens</span>
+                      <span className="token-cost">
+                        ({log.totalCost > 0 ? formatLogCost(log.totalCost) : estimateCost(log.totalTokens)})
+                      </span>
+                    </>
+                  ) : (log.errorMessage || 'Failed')}
                 </div>
                 <div className="log-time">{new Date(log.timestamp).toLocaleString()}</div>
               </div>

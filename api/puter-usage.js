@@ -46,10 +46,21 @@ async function getPuterUsage(apiKey) {
       ]);
       
       const whoami = await whoamiRes.json();
-      const usage = await usageRes.json();
+      const usageData = await usageRes.json();
       
       if (whoami.username || whoami.uuid) {
-        return { ...usage, isTemp: whoami.is_temp, username: whoami.username };
+        // Normalize the response structure for the frontend
+        // usageData.usage contains { "model:...": {...}, total: X }
+        return { 
+          ...usageData, 
+          isTemp: whoami.is_temp, 
+          username: whoami.username,
+          // Add a normalized usage.total for easier access
+          usage: {
+            ...usageData.usage,
+            total: usageData.usage?.total || 0
+          }
+        };
       }
     } catch (e) {
       continue;

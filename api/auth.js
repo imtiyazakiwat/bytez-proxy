@@ -46,16 +46,20 @@ async function getPuterKeyUsage(key) {
       ]);
       
       const whoami = await whoamiRes.json();
-      const usage = await usageRes.json();
+      const usageData = await usageRes.json();
       
       // If we got valid data, return it
       if (whoami.username || whoami.uuid) {
+        // usageData.usage contains model breakdowns + total at root
+        // e.g. { usage: { "claude:...": {...}, total: 12345 }, allowanceInfo: {...} }
+        const totalUsed = usageData.usage?.total || 0;
+        
         return {
           username: whoami.username,
           isTemp: whoami.is_temp,
-          used: usage.usage?.total || 0,
-          allowance: usage.allowanceInfo?.monthUsageAllowance || 0,
-          remaining: usage.allowanceInfo?.remaining || 0
+          used: totalUsed,
+          allowance: usageData.allowanceInfo?.monthUsageAllowance || 0,
+          remaining: usageData.allowanceInfo?.remaining || 0
         };
       }
     } catch (e) {
