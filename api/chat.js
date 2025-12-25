@@ -1,5 +1,6 @@
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
+import { invalidateUsageCache, invalidateAllUserCaches } from './cache.js';
 
 // Initialize Firebase Admin
 if (!getApps().length) {
@@ -572,6 +573,9 @@ async function logUsage(userId, model, usage, provider, success, errorMessage = 
         totalRequests: FieldValue.increment(1),
         lastRequestAt: new Date().toISOString(),
       });
+      
+      // Invalidate caches since user data changed
+      invalidateAllUserCaches(userId);
     }
   } catch (error) {
     console.error('Failed to log usage:', error.message);
@@ -707,6 +711,17 @@ async function callPuter(messages, modelId, puterToken, options = {}) {
       error.isRateLimit = isRateLimitError(errorMsg);
       throw error;
     }
+    
+    // Check for usage-limited response (Puter returns success but with usage-limited content)
+    if (data.metadata?.usage_limited || 
+        data.result?.message?.model === 'usage-limited' ||
+        data.metadata?.service_used === 'usage-limited-chat') {
+      const error = new Error('usage-limited: This key has reached its AI usage limit');
+      error.isRateLimit = true;
+      error.isUsageLimited = true;
+      throw error;
+    }
+    
     return data.result;
   } catch (err) {
     clearTimeout(timeoutId);
@@ -869,7 +884,7 @@ async function callPuterStream(messages, modelId, puterToken, options = {}, onCh
   }
 }
 
-// Call Puter with key rotation on rate limit errors - O(1) for successful requests
+// Call Puter with key rotation on rate limit errors - tries ALL keys in loop
 async function callPuterWithRotation(messages, modelId, userKeys, systemKeys, options = {}) {
   // User keys take priority, then system keys
   const allKeys = userKeys && userKeys.length > 0 ? [...userKeys] : [...(systemKeys || [])];
@@ -882,38 +897,81 @@ async function callPuterWithRotation(messages, modelId, userKeys, systemKeys, op
 
   let lastError = null;
   let usedKey = null;
-  let startIndex = 0;
+  const triedKeys = new Set();
   
-  // Get validated key - checks usage before using
+  // Random start index for load distribution
+  let startIndex = Math.floor(Math.random() * allKeys.length);
+  
+  // Try ALL keys in rotation - don't rely on pre-validation
   for (let attempt = 0; attempt < allKeys.length; attempt++) {
-    const result = await keyPool.getValidatedKey(allKeys, startIndex);
-    if (!result) {
-      throw new Error('All API keys are temporarily unavailable due to rate limits or exhausted allowance. Please try again later.');
+    const idx = (startIndex + attempt) % allKeys.length;
+    usedKey = allKeys[idx];
+    
+    // Skip if we already tried this key
+    if (triedKeys.has(usedKey)) continue;
+    triedKeys.add(usedKey);
+    
+    // Skip only if key is in monthly blocked set (confirmed exhausted)
+    const hash = keyPool.hashKey(usedKey);
+    if (keyPool.monthlyBlockedHashes.has(hash)) {
+      console.log(`[Rotation] Skipping key index ${idx} - monthly blocked`);
+      continue;
     }
     
-    usedKey = result.key;
-    startIndex = result.index + 1; // Start from next key on retry
+    // Skip if temp blocked (recent failure)
+    const block = keyPool.blockedKeys.get(hash);
+    if (block && Date.now() < block.until) {
+      console.log(`[Rotation] Skipping key index ${idx} - temp blocked for ${Math.round((block.until - Date.now())/1000)}s`);
+      continue;
+    }
     
     try {
-      console.log(`[O(1)] Attempt ${attempt + 1}: Using key index ${result.index}`);
+      console.log(`[Rotation] Attempt ${attempt + 1}/${allKeys.length}: Using key index ${idx}`);
       const apiResult = await callPuter(messages, modelId, usedKey, options);
       return { result: apiResult, usedKey };
     } catch (error) {
       lastError = error;
-      console.error(`Key index ${result.index} failed:`, error.message);
+      console.error(`Key index ${idx} failed:`, error.message);
       
-      if (error.isRateLimit) {
+      if (error.isRateLimit || error.isUsageLimited || isRateLimitError(error.message)) {
+        // Short temp block - will retry after cooldown
         markKeyFailed(usedKey);
-        if (isUsageLimitedError(error.message)) {
+        
+        // Mark as monthly limited if it's a confirmed usage limit error
+        if (error.isUsageLimited || isUsageLimitedError(error.message)) {
           await markKeyUsageLimited(usedKey);
         }
-        continue;
+        continue; // Try next key
       }
-      throw error;
+      
+      // For non-rate-limit errors, still try next key
+      continue;
     }
   }
   
-  throw lastError || new Error('All API keys failed');
+  // All keys exhausted - clear caches and try one more full rotation
+  console.log('[Rotation] All keys failed, clearing caches and retrying...');
+  keyPool.blockedKeys.clear();
+  keyPool.keyStatusCache.clear();
+  keyPool.activeKeysPool.clear();
+  
+  // Final attempt - try all keys again without any blocking
+  for (let attempt = 0; attempt < allKeys.length; attempt++) {
+    const idx = (startIndex + attempt) % allKeys.length;
+    usedKey = allKeys[idx];
+    
+    try {
+      console.log(`[Rotation FINAL] Attempt ${attempt + 1}/${allKeys.length}: Using key index ${idx}`);
+      const apiResult = await callPuter(messages, modelId, usedKey, options);
+      return { result: apiResult, usedKey };
+    } catch (error) {
+      lastError = error;
+      console.error(`[FINAL] Key index ${idx} failed:`, error.message);
+      continue;
+    }
+  }
+  
+  throw lastError || new Error('All API keys are exhausted. Please try again later or add more keys.');
 }
 
 function extractContent(result) {
@@ -1405,20 +1463,35 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
   let lastError = null;
   let usedKey = null;
   let success = false;
-  let startIndex = 0;
+  
+  // Random start index for load distribution
+  let startIndex = Math.floor(Math.random() * allKeys.length);
+  const triedKeys = new Set();
 
-  // Get validated key - checks usage before using
+  // Try ALL keys in rotation - don't rely on pre-validation
   for (let attempt = 0; attempt < allKeys.length && !success; attempt++) {
-    const keyResult = await keyPool.getValidatedKey(allKeys, startIndex);
-    if (!keyResult) {
-      res.write(`data: ${JSON.stringify({ error: { message: 'All API keys are temporarily unavailable due to rate limits or exhausted allowance. Please try again later.' } })}\n\n`);
-      res.end();
-      return;
+    const idx = (startIndex + attempt) % allKeys.length;
+    usedKey = allKeys[idx];
+    
+    // Skip if we already tried this key
+    if (triedKeys.has(usedKey)) continue;
+    triedKeys.add(usedKey);
+    
+    // Skip only if key is in monthly blocked set (confirmed exhausted)
+    const hash = keyPool.hashKey(usedKey);
+    if (keyPool.monthlyBlockedHashes.has(hash)) {
+      console.log(`[Stream Rotation] Skipping key index ${idx} - monthly blocked`);
+      continue;
     }
     
-    usedKey = keyResult.key;
-    startIndex = keyResult.index + 1;
-    console.log(`[Stream O(1)] Attempt ${attempt + 1}: Using key index ${keyResult.index}`);
+    // Skip if temp blocked (recent failure)
+    const block = keyPool.blockedKeys.get(hash);
+    if (block && Date.now() < block.until) {
+      console.log(`[Stream Rotation] Skipping key index ${idx} - temp blocked`);
+      continue;
+    }
+    
+    console.log(`[Stream Rotation] Attempt ${attempt + 1}/${allKeys.length}: Using key index ${idx}`);
 
     // Reset content for retry
     totalContent = '';
@@ -1589,19 +1662,111 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
       await logUsage(user.id, model, { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) }, provider, true, null, hasUserKeys ? usedKey : null);
     } catch (error) {
       lastError = error;
-      console.error(`[Stream] Key ${usedKey.substring(0, 20)}... failed:`, error.message);
+      console.error(`[Stream] Key index failed:`, error.message);
       
       if (isRateLimitError(error.message)) {
         markKeyFailed(usedKey);
-        // If it's a usage-limited error, mark for the whole day
+        // If it's a usage-limited error, mark for the whole month
         if (isUsageLimitedError(error.message)) {
           await markKeyUsageLimited(usedKey);
         }
-        // Continue to try next key
+      }
+      // Continue to try next key for any error
+      continue;
+    }
+  }
+
+  // If all keys failed, clear caches and try one more full rotation
+  if (!success) {
+    console.log('[Stream] All keys failed, clearing caches and retrying...');
+    keyPool.blockedKeys.clear();
+    keyPool.keyStatusCache.clear();
+    keyPool.activeKeysPool.clear();
+    
+    // Final attempt - try all keys again without any blocking
+    for (let attempt = 0; attempt < allKeys.length && !success; attempt++) {
+      const idx = (startIndex + attempt) % allKeys.length;
+      usedKey = allKeys[idx];
+      
+      console.log(`[Stream FINAL] Attempt ${attempt + 1}/${allKeys.length}: Using key index ${idx}`);
+
+      // Reset content for retry
+      totalContent = '';
+      totalReasoning = '';
+      let toolCalls = [];
+      let toolCallIndex = 0;
+
+      try {
+        // Send initial role chunk on first attempt
+        if (attempt === 0) {
+          res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+        }
+
+        let insideThinkTag = false;
+        let tagBuffer = '';
+
+        await callPuterStream(messages, model, usedKey, options, (chunk) => {
+          if (chunk.type === 'text' && chunk.text) {
+            let text = tagBuffer + chunk.text;
+            tagBuffer = '';
+            
+            while (text.length > 0) {
+              if (!insideThinkTag) {
+                const thinkStart = text.indexOf('<think>');
+                if (thinkStart !== -1) {
+                  const beforeThink = text.substring(0, thinkStart);
+                  if (beforeThink) {
+                    totalContent += beforeThink;
+                    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: beforeThink }, finish_reason: null }] })}\n\n`);
+                  }
+                  insideThinkTag = true;
+                  text = text.substring(thinkStart + 7);
+                } else {
+                  totalContent += text;
+                  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: text }, finish_reason: null }] })}\n\n`);
+                  text = '';
+                }
+              } else {
+                const thinkEnd = text.indexOf('</think>');
+                if (thinkEnd !== -1) {
+                  const thinkContent = text.substring(0, thinkEnd);
+                  if (thinkContent) {
+                    totalReasoning += thinkContent;
+                    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { reasoning_content: thinkContent }, finish_reason: null }] })}\n\n`);
+                  }
+                  insideThinkTag = false;
+                  text = text.substring(thinkEnd + 8);
+                } else {
+                  totalReasoning += text;
+                  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { reasoning_content: text }, finish_reason: null }] })}\n\n`);
+                  text = '';
+                }
+              }
+            }
+          } else if (chunk.type === 'reasoning' && chunk.text) {
+            totalReasoning += chunk.text;
+            res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { reasoning_content: chunk.text }, finish_reason: null }] })}\n\n`);
+          } else if (chunk.type === 'tool_use') {
+            const toolCall = { index: toolCallIndex, id: chunk.id, type: 'function', function: { name: chunk.name, arguments: chunk.arguments } };
+            toolCalls.push(toolCall);
+            res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { tool_calls: [toolCall] }, finish_reason: null }] })}\n\n`);
+            toolCallIndex++;
+          }
+        });
+        
+        success = true;
+        
+        const finishReason = toolCalls.length > 0 ? 'tool_calls' : 'stop';
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) } })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+        
+        await logUsage(user.id, model, { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) }, provider, true, null, hasUserKeys ? usedKey : null);
+      } catch (error) {
+        lastError = error;
+        console.error(`[Stream FINAL] Key index ${idx} failed:`, error.message);
         continue;
       }
-      // Non-rate-limit error, don't try other keys
-      break;
     }
   }
 

@@ -1,6 +1,10 @@
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
+import { 
+  userCache, usageCache, 
+  USER_CACHE_TTL, USAGE_CACHE_TTL 
+} from './cache.js';
 
 let db = null;
 let auth = null;
@@ -51,12 +55,26 @@ export default async function handler(req, res) {
   }
 
   try {
-    const userDoc = await db.collection('users').doc(decoded.uid).get();
-    if (!userDoc.exists) {
-      return res.status(404).json({ error: 'User not found' });
+    // Check cache first
+    const cacheKey = `usage_${decoded.uid}`;
+    const cached = usageCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < USAGE_CACHE_TTL) {
+      return res.json(cached.data);
     }
-
-    const user = userDoc.data();
+    
+    // Check user cache
+    let user;
+    const cachedUser = userCache.get(decoded.uid);
+    if (cachedUser && Date.now() - cachedUser.timestamp < USER_CACHE_TTL) {
+      user = cachedUser.data;
+    } else {
+      const userDoc = await db.collection('users').doc(decoded.uid).get();
+      if (!userDoc.exists) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+      user = userDoc.data();
+      userCache.set(decoded.uid, { data: user, timestamp: Date.now() });
+    }
     
     // Get usage logs (last 30 days)
     let logs = [];
@@ -175,7 +193,7 @@ export default async function handler(req, res) {
       .slice(0, 10)
       .map(([model, data]) => ({ model, ...data }));
 
-    return res.json({
+    const response = {
       // User limits
       freeRequestsUsed: user.freeRequestsUsed || 0,
       freeRequestsLimit: user.freeRequestsLimit || 20,
@@ -219,7 +237,12 @@ export default async function handler(req, res) {
         keyType: log.keyType,
         timestamp: log.timestamp,
       })),
-    });
+    };
+    
+    // Cache the response
+    usageCache.set(cacheKey, { data: response, timestamp: Date.now() });
+    
+    return res.json(response);
   } catch (error) {
     console.error('Usage error:', error);
     return res.status(500).json({ error: error.message });

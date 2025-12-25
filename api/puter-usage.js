@@ -1,6 +1,10 @@
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
+import { 
+  userCache, puterUsageCache, 
+  USER_CACHE_TTL, PUTER_CACHE_TTL 
+} from './cache.js';
 
 // Initialize Firebase Admin
 let db = null;
@@ -90,23 +94,46 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Get user's Puter keys
-    const userDoc = await db.collection('users').doc(decoded.uid).get();
-    if (!userDoc.exists) {
-      return res.json({ keys: [], totalUsage: null });
+    // Check user cache first
+    const cachedUser = userCache.get(decoded.uid);
+    let userData;
+    
+    if (cachedUser && Date.now() - cachedUser.timestamp < USER_CACHE_TTL) {
+      userData = cachedUser.data;
+    } else {
+      const userDoc = await db.collection('users').doc(decoded.uid).get();
+      if (!userDoc.exists) {
+        return res.json({ keys: [], totalUsage: null });
+      }
+      userData = userDoc.data();
+      userCache.set(decoded.uid, { data: userData, timestamp: Date.now() });
     }
 
-    const userData = userDoc.data();
     const puterKeys = userData.puterKeys || [];
 
     if (puterKeys.length === 0) {
       return res.json({ keys: [], totalUsage: null, message: 'No Puter keys added' });
     }
 
-    // Fetch usage for each key
+    // Fetch usage for each key (with caching for Puter API calls)
     const usagePromises = puterKeys.map(async (keyData, index) => {
       const key = typeof keyData === 'string' ? keyData : keyData.key;
+      
+      // Check Puter usage cache
+      const cachedUsage = puterUsageCache.get(key);
+      if (cachedUsage && Date.now() - cachedUsage.timestamp < PUTER_CACHE_TTL) {
+        return {
+          id: index,
+          preview: key.substring(0, 20) + '...' + key.slice(-8),
+          usage: cachedUsage.data.error ? null : cachedUsage.data,
+          error: cachedUsage.data.error || null,
+          cached: true
+        };
+      }
+      
       const usage = await getPuterUsage(key);
+      puterUsageCache.set(key, { data: usage, timestamp: Date.now() });
+      
       return {
         id: index,
         preview: key.substring(0, 20) + '...' + key.slice(-8),

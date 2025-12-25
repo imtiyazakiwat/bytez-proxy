@@ -2,6 +2,10 @@ import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
 import { v4 as uuidv4 } from 'uuid';
+import { 
+  getCachedUser, setCachedUser, invalidateUserCache, invalidateAllUserCaches,
+  USER_CACHE_TTL 
+} from './cache.js';
 
 // Initialize Firebase Admin
 let db = null;
@@ -125,8 +129,15 @@ async function verifyToken(idToken) {
 }
 
 // Get or create user
-async function getOrCreateUser(uid, email) {
+async function getOrCreateUser(uid, email, skipCache = false) {
   if (!db) return null;
+  
+  // Check cache first
+  if (!skipCache) {
+    const cached = getCachedUser(uid);
+    if (cached) return cached;
+  }
+  
   const userRef = db.collection('users').doc(uid);
   const userDoc = await userRef.get();
   
@@ -144,10 +155,13 @@ async function getOrCreateUser(uid, email) {
       updatedAt: new Date().toISOString(),
     };
     await userRef.set(userData);
+    setCachedUser(uid, userData);
     return userData;
   }
   
-  return userDoc.data();
+  const userData = userDoc.data();
+  setCachedUser(uid, userData);
+  return userData;
 }
 
 export default async function handler(req, res) {
@@ -273,6 +287,7 @@ export default async function handler(req, res) {
         
         keys.push(key.trim());
         await userRef.update({ [field]: keys, updatedAt: new Date().toISOString() });
+        invalidateUserCache(uid);
         
         return res.json({ 
           success: true, 
@@ -298,6 +313,7 @@ export default async function handler(req, res) {
         
         keys.splice(keyIndex, 1);
         await userRef.update({ puterKeys: keys, updatedAt: new Date().toISOString() });
+        invalidateUserCache(uid);
         
         return res.json({ success: true, keysCount: keys.length });
       }
@@ -305,6 +321,7 @@ export default async function handler(req, res) {
       if (action === 'regenerateApiKey') {
         const newApiKey = generateApiKey();
         await userRef.update({ apiKey: newApiKey, updatedAt: new Date().toISOString() });
+        invalidateUserCache(uid);
         return res.json({ success: true, apiKey: newApiKey });
       }
       
