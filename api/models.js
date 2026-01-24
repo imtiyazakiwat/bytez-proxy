@@ -3,6 +3,8 @@ let modelsCache = null;
 let cacheTime = 0;
 const CACHE_TTL = 3600000; // 1 hour
 
+import { getG4FModels } from './g4f.js';
+
 // Non-chat models to exclude (code models, embedding models, image models, etc.)
 const NON_CHAT_MODEL_PATTERNS = [
   /codex/i,           // Code completion models
@@ -23,11 +25,16 @@ const NON_CHAT_MODEL_PATTERNS = [
 ];
 
 function isChatModel(modelId) {
+  // G4F models are always valid chat models
+  if (modelId.startsWith('g4f:')) {
+    return true;
+  }
+
   // Only include openrouter: models for reliability
   if (!modelId.startsWith('openrouter:')) {
     return false;
   }
-  
+
   // Exclude models matching non-chat patterns
   for (const pattern of NON_CHAT_MODEL_PATTERNS) {
     if (pattern.test(modelId)) {
@@ -49,14 +56,14 @@ async function fetchPuterModels() {
         'User-Agent': 'UnifiedAI/1.0',
       }
     });
-    
+
     // Check if response is JSON
     const contentType = response.headers.get('content-type') || '';
     if (!contentType.includes('application/json')) {
       console.error('Puter models endpoint returned non-JSON:', contentType);
       return modelsCache || getDefaultModels();
     }
-    
+
     const data = await response.json();
     // Filter to only include OpenRouter chat/text models
     modelsCache = (data.models || []).filter(isChatModel);
@@ -89,24 +96,25 @@ function categorizeModel(modelId) {
     const isFree = modelId.includes(':free');
     return { provider, tier: isFree ? 'free' : 'standard', via: 'openrouter' };
   }
-  
+
   if (modelId.startsWith('gpt-') || modelId.startsWith('o1') || modelId.startsWith('o3') || modelId.startsWith('o4')) {
-    const tier = modelId.includes('5.1') || modelId.includes('o3') || modelId.includes('o1') ? 'premium' : 
-                 modelId.includes('mini') ? 'economy' : 'standard';
+    const tier = modelId.includes('5.1') || modelId.includes('o3') || modelId.includes('o1') ? 'premium' :
+      modelId.includes('mini') ? 'economy' : 'standard';
     return { provider: 'openai', tier, via: 'direct' };
   }
-  
+
   if (modelId.startsWith('claude')) {
     const tier = modelId.includes('opus') ? 'premium' : modelId.includes('haiku') ? 'economy' : 'standard';
     return { provider: 'anthropic', tier, via: 'direct' };
   }
-  
+
   if (modelId.startsWith('deepseek')) return { provider: 'deepseek', tier: 'economy', via: 'direct' };
   if (modelId.startsWith('mistral')) return { provider: 'mistral', tier: 'standard', via: 'direct' };
   if (modelId.startsWith('gemini')) return { provider: 'google', tier: 'standard', via: 'direct' };
   if (modelId.startsWith('grok')) return { provider: 'xai', tier: 'premium', via: 'direct' };
   if (modelId.startsWith('togetherai:')) return { provider: 'together', tier: 'standard', via: 'together' };
-  
+  if (modelId.startsWith('g4f:')) return { provider: 'g4f', tier: 'free', via: 'g4f' };
+
   return { provider: 'unknown', tier: 'standard', via: 'unknown' };
 }
 
@@ -119,7 +127,7 @@ async function fetchImageModels() {
   if (imageModelsCache && Date.now() - imageCacheTime < CACHE_TTL) {
     return imageModelsCache;
   }
-  
+
   try {
     const response = await fetch('https://puter.com/puterai/chat/models', {
       headers: {
@@ -127,40 +135,40 @@ async function fetchImageModels() {
         'User-Agent': 'UnifiedAI/1.0',
       }
     });
-    
+
     const contentType = response.headers.get('content-type') || '';
     if (!contentType.includes('application/json')) {
       console.error('Puter models endpoint returned non-JSON for images');
       return imageModelsCache || getDefaultImageModels();
     }
-    
+
     const data = await response.json();
     const allModels = data.models || [];
-    
+
     // Filter for image-related models
-    const imageKeywords = ['image', 'flux', 'dall-e', 'stable-diffusion', 'sdxl', 'sd3', 
+    const imageKeywords = ['image', 'flux', 'dall-e', 'stable-diffusion', 'sdxl', 'sd3',
       'imagen', 'seedream', 'hidream', 'juggernaut', 'ideogram', 'qwen-image'];
-    
+
     const imageModels = allModels.filter(m => {
       const lower = m.toLowerCase();
       return imageKeywords.some(k => lower.includes(k));
     }).map(id => {
       const lower = id.toLowerCase();
       let provider = 'unknown', tier = 'standard', supportsEdit = false;
-      
+
       if (lower.includes('flux')) provider = 'black-forest-labs';
       else if (lower.includes('stable') || lower.includes('sdxl')) provider = 'stability';
       else if (lower.includes('dall-e') || lower.includes('gpt-image')) provider = 'openai';
       else if (lower.includes('gemini') || lower.includes('imagen')) { provider = 'google'; supportsEdit = lower.includes('gemini'); }
       else if (lower.includes('seedream')) provider = 'bytedance';
       else if (lower.includes('ideogram')) provider = 'ideogram';
-      
+
       if (lower.includes('free') || lower.includes('schnell')) tier = 'free';
       else if (lower.includes('pro') || lower.includes('ultra')) tier = 'premium';
-      
+
       return { id, provider, tier, via: 'puter', type: 'image', supportsEdit };
     });
-    
+
     // Add common aliases
     const aliases = [
       { id: 'nano-banana', provider: 'google', tier: 'standard', via: 'puter', type: 'image', supportsEdit: true },
@@ -170,7 +178,7 @@ async function fetchImageModels() {
       { id: 'sdxl', provider: 'stability', tier: 'economy', via: 'puter', type: 'image', supportsEdit: false },
       { id: 'sd3', provider: 'stability', tier: 'standard', via: 'puter', type: 'image', supportsEdit: false },
     ];
-    
+
     imageModelsCache = [...aliases, ...imageModels];
     imageCacheTime = Date.now();
     return imageModelsCache;
@@ -198,7 +206,7 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  
+
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   const { format, provider, tier, search, via, type } = req.query;
@@ -217,12 +225,27 @@ export default async function handler(req, res) {
     }
 
     const allModels = await fetchPuterModels();
-    
+
+    // Add G4F models
+    const g4fModelsMap = getG4FModels();
+    const g4fModelIds = Object.keys(g4fModelsMap);
+
     // Transform to enriched format
     let models = allModels.map(id => {
       const { provider, tier, via } = categorizeModel(id);
       return { id, provider, tier, via, type: 'chat' };
     });
+
+    // Add G4F models to the list
+    const g4fModels = g4fModelIds.map(id => ({
+      id,
+      provider: 'g4f',
+      tier: 'free',
+      via: 'g4f',
+      type: 'chat',
+      description: g4fModelsMap[id].description
+    }));
+    models = [...g4fModels, ...models];
 
     // Include image models if type=all
     if (type === 'all') {

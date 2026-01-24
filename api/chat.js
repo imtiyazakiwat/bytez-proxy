@@ -1,6 +1,7 @@
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import { invalidateUsageCache, invalidateAllUserCaches } from './cache.js';
+import { callG4F, callG4FStream, isG4FModel } from './g4f.js';
 
 // Initialize Firebase Admin
 if (!getApps().length) {
@@ -27,7 +28,7 @@ const PUTER_API_BASE = 'https://api.puter.com';
 // Check if a Puter key is active (has remaining allowance)
 async function checkPuterKeyActive(key) {
   const origins = ['https://puter.com', 'https://g4f.dev', 'https://api.puter.com'];
-  
+
   for (const origin of origins) {
     try {
       const [whoamiRes, usageRes] = await Promise.all([
@@ -38,15 +39,15 @@ async function checkPuterKeyActive(key) {
           headers: { 'Authorization': `Bearer ${key}`, 'Origin': origin }
         })
       ]);
-      
+
       const whoami = await whoamiRes.json();
       const usageData = await usageRes.json();
-      
+
       if (whoami.username || whoami.uuid) {
         const remaining = usageData.allowanceInfo?.remaining || 0;
         const isActive = remaining > 0;
-        return { 
-          valid: true, 
+        return {
+          valid: true,
           active: isActive,
           remaining,
           username: whoami.username,
@@ -57,7 +58,7 @@ async function checkPuterKeyActive(key) {
       continue;
     }
   }
-  
+
   return { valid: false, active: false, remaining: 0 };
 }
 
@@ -70,7 +71,7 @@ class KeyPoolManager {
     this.SHORT_COOLDOWN_MS = 5 * 60 * 1000; // 5 min for temp failures
     this.keyStatusCache = new Map(); // hash -> { active: boolean, checkedAt: timestamp }
     this.KEY_STATUS_CACHE_MS = 10 * 60 * 1000; // Cache key status for 10 minutes
-    
+
     // Pre-filtered active keys pool
     this.activeKeysPool = new Map(); // poolId -> { keys: [], lastRefresh: timestamp }
     this.POOL_REFRESH_MS = 10 * 60 * 1000; // Refresh pool every 10 minutes
@@ -109,7 +110,7 @@ class KeyPoolManager {
       until: Date.now() + this.SHORT_COOLDOWN_MS,
       reason: 'temp'
     });
-    console.log(`[KeyPool] Temp blocked: ${hash} for ${this.SHORT_COOLDOWN_MS/1000}s`);
+    console.log(`[KeyPool] Temp blocked: ${hash} for ${this.SHORT_COOLDOWN_MS / 1000}s`);
   }
 
   // O(1) - Mark key as usage-limited for the month
@@ -117,12 +118,12 @@ class KeyPoolManager {
     this.checkMonthReset();
     const hash = this.hashKey(key);
     this.monthlyBlockedHashes.add(hash);
-    
+
     // Remove from all active pools
     for (const [poolId, pool] of this.activeKeysPool) {
       pool.keys = pool.keys.filter(k => this.hashKey(k) !== hash);
     }
-    
+
     console.log(`[KeyPool] Monthly blocked: ${hash}`);
 
     // Persist to DB (fire and forget for speed)
@@ -177,16 +178,16 @@ class KeyPoolManager {
   // Batch validate all keys in parallel - returns only active keys
   async batchValidateKeys(keys) {
     if (!keys || keys.length === 0) return [];
-    
+
     const startTime = Date.now();
     console.log(`[KeyPool] Batch validating ${keys.length} keys in parallel...`);
-    
+
     // Filter out already blocked keys first (sync)
     const candidateKeys = keys.filter(key => this.isKeyAvailable(key));
     console.log(`[KeyPool] ${candidateKeys.length} keys passed sync check`);
-    
+
     if (candidateKeys.length === 0) return [];
-    
+
     // Check all candidates in parallel
     const results = await Promise.all(
       candidateKeys.map(async (key) => {
@@ -194,19 +195,19 @@ class KeyPoolManager {
         if (cached) {
           return { key, active: cached.active, remaining: cached.remaining };
         }
-        
+
         try {
           const status = await checkPuterKeyActive(key);
           this.setCachedKeyStatus(key, status.active, status.remaining);
-          
+
           if (!status.valid || !status.active) {
             if (!status.active) {
               // Don't await - fire and forget for speed
-              this.markMonthlyLimited(key).catch(() => {});
+              this.markMonthlyLimited(key).catch(() => { });
             }
             return { key, active: false, remaining: 0 };
           }
-          
+
           return { key, active: true, remaining: status.remaining };
         } catch (e) {
           // On error, assume key might be available
@@ -214,37 +215,37 @@ class KeyPoolManager {
         }
       })
     );
-    
+
     // Filter to only active keys, sorted by remaining allowance (highest first)
     const activeKeys = results
       .filter(r => r.active)
       .sort((a, b) => b.remaining - a.remaining)
       .map(r => r.key);
-    
+
     const elapsed = Date.now() - startTime;
     console.log(`[KeyPool] Batch validation complete: ${activeKeys.length}/${keys.length} active keys (${elapsed}ms)`);
-    
+
     return activeKeys;
   }
 
   // Get or refresh the active keys pool
   async getActiveKeysPool(keys) {
     if (!keys || keys.length === 0) return [];
-    
+
     const poolId = this.getPoolId(keys);
     const pool = this.activeKeysPool.get(poolId);
-    
+
     // Check if pool exists and is fresh
     if (pool && Date.now() - pool.lastRefresh < this.POOL_REFRESH_MS && pool.keys.length > 0) {
       return pool.keys;
     }
-    
+
     // Check if refresh is already in progress
     if (this.poolRefreshInProgress.has(poolId)) {
       // Wait for existing refresh to complete
       return await this.poolRefreshInProgress.get(poolId);
     }
-    
+
     // Start new refresh
     const refreshPromise = (async () => {
       try {
@@ -255,7 +256,7 @@ class KeyPoolManager {
         this.poolRefreshInProgress.delete(poolId);
       }
     })();
-    
+
     this.poolRefreshInProgress.set(poolId, refreshPromise);
     return await refreshPromise;
   }
@@ -263,7 +264,7 @@ class KeyPoolManager {
   // O(1) amortized - Get first available key from array (uses index rotation)
   getAvailableKey(keys, startIndex = 0) {
     if (!keys || keys.length === 0) return null;
-    
+
     // Try from startIndex, wrap around once
     for (let i = 0; i < keys.length; i++) {
       const idx = (startIndex + i) % keys.length;
@@ -277,32 +278,32 @@ class KeyPoolManager {
   // Fast O(1) key selection from pre-filtered pool
   async getValidatedKey(keys, startIndex = 0) {
     if (!keys || keys.length === 0) return null;
-    
+
     // Get pre-filtered active keys pool
     const activeKeys = await this.getActiveKeysPool(keys);
-    
+
     if (activeKeys.length === 0) {
       console.log('[KeyPool] No active keys available in pool');
       return null;
     }
-    
+
     // Simple rotation within active pool
     const idx = startIndex % activeKeys.length;
     const key = activeKeys[idx];
-    
+
     // Find original index for logging
     const originalIdx = keys.indexOf(key);
-    
+
     return { key, index: originalIdx !== -1 ? originalIdx : idx };
   }
 
   // Load monthly blocked keys from DB (called once per month per server instance)
   async loadMonthlyBlockedFromDB() {
     if (this.dbCacheLoaded || !db) return;
-    
+
     this.checkMonthReset();
     const currentMonth = new Date().toISOString().slice(0, 7);
-    
+
     try {
       const doc = await db.collection('failed_keys').doc(currentMonth).get();
       if (doc.exists) {
@@ -357,8 +358,8 @@ const OPENROUTER_MODEL_MAP = {
 // Check if content array contains images
 function hasImageContent(content) {
   if (!Array.isArray(content)) return false;
-  return content.some(part => 
-    part.type === 'image_url' || 
+  return content.some(part =>
+    part.type === 'image_url' ||
     part.type === 'image' ||
     (part.image_url && part.image_url.url)
   );
@@ -367,7 +368,7 @@ function hasImageContent(content) {
 // Check if content array contains file attachments (PDF, Excel, etc.)
 function hasFileContent(content) {
   if (!Array.isArray(content)) return false;
-  return content.some(part => 
+  return content.some(part =>
     part.type === 'file' ||
     (part.file && (part.file.file_data || part.file.url))
   );
@@ -397,7 +398,7 @@ function normalizeContent(content, preserveMultimodal = false) {
         return null;
       }).filter(Boolean);
     }
-    
+
     // Handle multimodal content array format: [{type: "text", text: "..."}, ...]
     return content
       .map(part => {
@@ -420,22 +421,27 @@ function normalizeContent(content, preserveMultimodal = false) {
 }
 
 function getDriverAndModel(modelId) {
+  // G4F models - route through G4F driver
+  if (modelId.startsWith('g4f:')) {
+    return { driver: 'g4f', model: modelId };
+  }
+
   // Already prefixed with openrouter: - use as-is
   if (modelId.startsWith('openrouter:')) {
     return { driver: 'openrouter', model: modelId };
   }
-  
+
   // TogetherAI models
   if (modelId.startsWith('togetherai:')) {
     return { driver: 'together-ai', model: modelId };
   }
-  
+
   // Check if we have a known mapping for this model
   const openRouterModel = OPENROUTER_MODEL_MAP[modelId];
   if (openRouterModel) {
     return { driver: 'openrouter', model: `openrouter:${openRouterModel}` };
   }
-  
+
   // For unknown models, try to route through OpenRouter with smart prefix detection
   // This handles models from the Puter models list that aren't in our map
   if (modelId.startsWith('gpt-') || modelId.startsWith('o1') || modelId.startsWith('o3') || modelId.startsWith('o4')) {
@@ -456,7 +462,7 @@ function getDriverAndModel(modelId) {
   if (modelId.startsWith('deepseek')) {
     return { driver: 'openrouter', model: `openrouter:deepseek/${modelId}` };
   }
-  
+
   // Default: try OpenRouter with the model ID as-is (it may fail but gives better error)
   return { driver: 'openrouter', model: `openrouter:${modelId}` };
 }
@@ -531,18 +537,18 @@ async function markKeyUsageLimited(key) {
 // Log usage to Firestore
 async function logUsage(userId, model, usage, provider, success, errorMessage = null, keyUsed = null) {
   if (!db) return;
-  
+
   try {
     // Usage object now contains cost data from extractUsage()
     const promptTokens = usage?.prompt_tokens || 0;
     const completionTokens = usage?.completion_tokens || 0;
     const totalTokens = usage?.total_tokens || (promptTokens + completionTokens);
-    
+
     // Cost is in Puter units (1e8 = $1)
     const promptCost = usage?.prompt_cost || 0;
     const completionCost = usage?.completion_cost || 0;
     const totalCost = usage?.total_cost || (promptCost + completionCost);
-    
+
     const logEntry = {
       userId,
       model,
@@ -559,9 +565,9 @@ async function logUsage(userId, model, usage, provider, success, errorMessage = 
       timestamp: new Date().toISOString(),
       date: new Date().toISOString().split('T')[0],
     };
-    
+
     await db.collection('usage_logs').add(logEntry);
-    
+
     // Update user's total token counts
     if (success && totalTokens > 0) {
       const userRef = db.collection('users').doc(userId);
@@ -573,7 +579,7 @@ async function logUsage(userId, model, usage, provider, success, errorMessage = 
         totalRequests: FieldValue.increment(1),
         lastRequestAt: new Date().toISOString(),
       });
-      
+
       // Invalidate caches since user data changed
       invalidateAllUserCaches(userId);
     }
@@ -585,22 +591,22 @@ async function logUsage(userId, model, usage, provider, success, errorMessage = 
 // Check if error is a rate limit / usage limit error
 function isRateLimitError(error) {
   const errorMsg = (error?.message || error || '').toLowerCase();
-  return errorMsg.includes('rate limit') || 
-         errorMsg.includes('usage limit') ||
-         errorMsg.includes('usage-limited') ||
-         errorMsg.includes('quota') ||
-         errorMsg.includes('exceeded') ||
-         errorMsg.includes('too many requests') ||
-         errorMsg.includes('permission denied') ||
-         errorMsg.includes('429');
+  return errorMsg.includes('rate limit') ||
+    errorMsg.includes('usage limit') ||
+    errorMsg.includes('usage-limited') ||
+    errorMsg.includes('quota') ||
+    errorMsg.includes('exceeded') ||
+    errorMsg.includes('too many requests') ||
+    errorMsg.includes('permission denied') ||
+    errorMsg.includes('429');
 }
 
 // Check if error is specifically a usage limit (should be blocked for the month)
 function isUsageLimitedError(errorMsg) {
   const msg = (errorMsg || '').toLowerCase();
-  return msg.includes('usage-limited') || 
-         msg.includes('usage limit') ||
-         msg.includes('permission denied');
+  return msg.includes('usage-limited') ||
+    msg.includes('usage limit') ||
+    msg.includes('permission denied');
 }
 
 // Models that support extended thinking with :thinking variant on Puter/OpenRouter
@@ -616,19 +622,19 @@ const THINKING_MODEL_MAP = {
 
 function supportsThinking(modelId) {
   // Check if model is in thinking map or already has :thinking suffix
-  return modelId.includes(':thinking') || 
-         Object.keys(THINKING_MODEL_MAP).some(m => modelId.includes(m));
+  return modelId.includes(':thinking') ||
+    Object.keys(THINKING_MODEL_MAP).some(m => modelId.includes(m));
 }
 
 function getThinkingModel(modelId) {
   // If already has :thinking suffix, return as-is
   if (modelId.includes(':thinking')) return modelId;
-  
+
   // Check if we have a mapping for this model - use exact match first
   if (THINKING_MODEL_MAP[modelId]) {
     return THINKING_MODEL_MAP[modelId];
   }
-  
+
   // Then try partial match (for prefixed models like openrouter:...)
   for (const [key, value] of Object.entries(THINKING_MODEL_MAP)) {
     if (modelId.includes(key)) {
@@ -644,27 +650,27 @@ const API_TIMEOUT_MS = 120000; // 120 seconds for thinking models
 async function callPuter(messages, modelId, puterToken, options = {}) {
   const hasTools = !!(options.tools && options.tools.length > 0);
   let { driver, model } = getDriverAndModel(modelId, hasTools);
-  
+
   // Check if thinking is requested and model supports it
   const wantsThinking = options.thinking_budget && options.thinking_budget > 0;
   const thinkingModel = wantsThinking ? getThinkingModel(modelId) : null;
-  
+
   if (thinkingModel) {
     // Override to use the :thinking variant
     model = `openrouter:${thinkingModel}`;
     console.log(`[Puter] Using thinking model variant: ${model}`);
   }
-  
+
   const args = { messages, model };
   if (options.max_tokens) args.max_tokens = options.max_tokens;
   if (options.temperature !== undefined) args.temperature = options.temperature;
   if (options.tools) args.tools = options.tools;
   if (options.tool_choice) args.tool_choice = options.tool_choice;
-  
+
   // Always enable reasoning - non-thinking models will ignore it,
   // but thinking models will return reasoning_content regardless of name pattern
   args.include_reasoning = true;
-  
+
   // Enable extended thinking for supported models
   if (thinkingModel || supportsThinking(modelId)) {
     // Use thinking budget from options, or default to 10000 tokens
@@ -701,27 +707,27 @@ async function callPuter(messages, modelId, puterToken, options = {}) {
     clearTimeout(timeoutId);
 
     const data = await response.json();
-    
+
     // DEBUG: Log raw Puter response to see reasoning structure
     console.log('[Puter DEBUG] Raw response:', JSON.stringify(data, null, 2).substring(0, 3000));
-    
+
     if (!data.success) {
       const errorMsg = data.error?.message || data.error || 'Puter API error';
       const error = new Error(errorMsg);
       error.isRateLimit = isRateLimitError(errorMsg);
       throw error;
     }
-    
+
     // Check for usage-limited response (Puter returns success but with usage-limited content)
-    if (data.metadata?.usage_limited || 
-        data.result?.message?.model === 'usage-limited' ||
-        data.metadata?.service_used === 'usage-limited-chat') {
+    if (data.metadata?.usage_limited ||
+      data.result?.message?.model === 'usage-limited' ||
+      data.metadata?.service_used === 'usage-limited-chat') {
       const error = new Error('usage-limited: This key has reached its AI usage limit');
       error.isRateLimit = true;
       error.isUsageLimited = true;
       throw error;
     }
-    
+
     return data.result;
   } catch (err) {
     clearTimeout(timeoutId);
@@ -736,24 +742,24 @@ async function callPuter(messages, modelId, puterToken, options = {}) {
 async function callPuterStream(messages, modelId, puterToken, options = {}, onChunk) {
   const hasTools = !!(options.tools && options.tools.length > 0);
   let { driver, model } = getDriverAndModel(modelId, hasTools);
-  
+
   // Check if thinking is requested and model supports it
   const wantsThinking = options.thinking_budget && options.thinking_budget > 0;
   const thinkingModel = wantsThinking ? getThinkingModel(modelId) : null;
-  
+
   if (thinkingModel) {
     // Override to use the :thinking variant
     model = `openrouter:${thinkingModel}`;
     console.log(`[Puter Stream] Using thinking model variant: ${model}`);
   }
-  
+
   const args = { messages, model, stream: true };
   if (options.max_tokens) args.max_tokens = options.max_tokens;
   if (options.temperature !== undefined) args.temperature = options.temperature;
   if (options.tools) args.tools = options.tools;
   if (options.tool_choice) args.tool_choice = options.tool_choice;
   args.include_reasoning = true;
-  
+
   // Enable extended thinking for supported models
   if (thinkingModel || supportsThinking(modelId)) {
     const thinkingBudget = options.thinking_budget || 10000;
@@ -794,7 +800,7 @@ async function callPuterStream(messages, modelId, puterToken, options = {}, onCh
 
   // Check content-type to determine if it's a streaming response
   const contentType = response.headers.get('content-type') || '';
-  
+
   // If it's a JSON response (non-streaming fallback), handle it
   if (contentType.includes('application/json')) {
     const data = await response.json();
@@ -820,7 +826,7 @@ async function callPuterStream(messages, modelId, puterToken, options = {}, onCh
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
-      
+
       // Process complete lines from buffer
       const lines = buffer.split('\n');
       buffer = lines.pop() || ''; // Keep incomplete line in buffer
@@ -831,12 +837,12 @@ async function callPuterStream(messages, modelId, puterToken, options = {}, onCh
 
         try {
           const data = JSON.parse(trimmed);
-          
+
           // Check for error in stream
           if (data.success === false || data.error) {
             throw new Error(data.error?.message || data.error || 'Stream error');
           }
-          
+
           // Handle streaming chunks
           if (data.type === 'text' && data.text) {
             onChunk({ type: 'text', text: data.text });
@@ -844,8 +850,8 @@ async function callPuterStream(messages, modelId, puterToken, options = {}, onCh
             onChunk({ type: 'reasoning', text: data.reasoning || data.text });
           } else if (data.type === 'tool_use') {
             // Handle tool call in stream
-            onChunk({ 
-              type: 'tool_use', 
+            onChunk({
+              type: 'tool_use',
               id: data.id,
               name: data.name,
               arguments: typeof data.input === 'string' ? data.input : JSON.stringify(data.input || {})
@@ -868,8 +874,8 @@ async function callPuterStream(messages, modelId, puterToken, options = {}, onCh
         } else if (data.type === 'reasoning' && (data.reasoning || data.text)) {
           onChunk({ type: 'reasoning', text: data.reasoning || data.text });
         } else if (data.type === 'tool_use') {
-          onChunk({ 
-            type: 'tool_use', 
+          onChunk({
+            type: 'tool_use',
             id: data.id,
             name: data.name,
             arguments: typeof data.input === 'string' ? data.input : JSON.stringify(data.input || {})
@@ -898,33 +904,33 @@ async function callPuterWithRotation(messages, modelId, userKeys, systemKeys, op
   let lastError = null;
   let usedKey = null;
   const triedKeys = new Set();
-  
+
   // Random start index for load distribution
   let startIndex = Math.floor(Math.random() * allKeys.length);
-  
+
   // Try ALL keys in rotation - don't rely on pre-validation
   for (let attempt = 0; attempt < allKeys.length; attempt++) {
     const idx = (startIndex + attempt) % allKeys.length;
     usedKey = allKeys[idx];
-    
+
     // Skip if we already tried this key
     if (triedKeys.has(usedKey)) continue;
     triedKeys.add(usedKey);
-    
+
     // Skip only if key is in monthly blocked set (confirmed exhausted)
     const hash = keyPool.hashKey(usedKey);
     if (keyPool.monthlyBlockedHashes.has(hash)) {
       console.log(`[Rotation] Skipping key index ${idx} - monthly blocked`);
       continue;
     }
-    
+
     // Skip if temp blocked (recent failure)
     const block = keyPool.blockedKeys.get(hash);
     if (block && Date.now() < block.until) {
-      console.log(`[Rotation] Skipping key index ${idx} - temp blocked for ${Math.round((block.until - Date.now())/1000)}s`);
+      console.log(`[Rotation] Skipping key index ${idx} - temp blocked for ${Math.round((block.until - Date.now()) / 1000)}s`);
       continue;
     }
-    
+
     try {
       console.log(`[Rotation] Attempt ${attempt + 1}/${allKeys.length}: Using key index ${idx}`);
       const apiResult = await callPuter(messages, modelId, usedKey, options);
@@ -932,34 +938,34 @@ async function callPuterWithRotation(messages, modelId, userKeys, systemKeys, op
     } catch (error) {
       lastError = error;
       console.error(`Key index ${idx} failed:`, error.message);
-      
+
       if (error.isRateLimit || error.isUsageLimited || isRateLimitError(error.message)) {
         // Short temp block - will retry after cooldown
         markKeyFailed(usedKey);
-        
+
         // Mark as monthly limited if it's a confirmed usage limit error
         if (error.isUsageLimited || isUsageLimitedError(error.message)) {
           await markKeyUsageLimited(usedKey);
         }
         continue; // Try next key
       }
-      
+
       // For non-rate-limit errors, still try next key
       continue;
     }
   }
-  
+
   // All keys exhausted - clear caches and try one more full rotation
   console.log('[Rotation] All keys failed, clearing caches and retrying...');
   keyPool.blockedKeys.clear();
   keyPool.keyStatusCache.clear();
   keyPool.activeKeysPool.clear();
-  
+
   // Final attempt - try all keys again without any blocking
   for (let attempt = 0; attempt < allKeys.length; attempt++) {
     const idx = (startIndex + attempt) % allKeys.length;
     usedKey = allKeys[idx];
-    
+
     try {
       console.log(`[Rotation FINAL] Attempt ${attempt + 1}/${allKeys.length}: Using key index ${idx}`);
       const apiResult = await callPuter(messages, modelId, usedKey, options);
@@ -970,7 +976,7 @@ async function callPuterWithRotation(messages, modelId, userKeys, systemKeys, op
       continue;
     }
   }
-  
+
   throw lastError || new Error('All API keys are exhausted. Please try again later or add more keys.');
 }
 
@@ -995,33 +1001,33 @@ function extractContent(result) {
 // Extract reasoning/thinking content from response
 function extractReasoning(result) {
   // OpenRouter format: reasoning field in message or choices
-  const reasoning = result.message?.reasoning 
+  const reasoning = result.message?.reasoning
     || result.choices?.[0]?.message?.reasoning
     || result.reasoning;
-  
+
   if (reasoning) return reasoning;
-  
+
   // DeepSeek native format: reasoning_content
-  const reasoningContent = result.message?.reasoning_content 
+  const reasoningContent = result.message?.reasoning_content
     || result.choices?.[0]?.message?.reasoning_content
     || result.reasoning_content;
-  
+
   if (reasoningContent) return reasoningContent;
-  
+
   // Check reasoning_details array (OpenRouter extended thinking format)
   const reasoningDetails = result.message?.reasoning_details
     || result.choices?.[0]?.message?.reasoning_details;
   if (reasoningDetails && Array.isArray(reasoningDetails) && reasoningDetails.length > 0) {
     return reasoningDetails.map(d => d.text || '').join('\n');
   }
-  
+
   // Check for thinking in content (some models wrap it in <think> tags)
   const content = extractContent(result);
   if (content && content.includes('<think>')) {
     const match = content.match(/<think>([\s\S]*?)<\/think>/);
     if (match) return match[1].trim();
   }
-  
+
   return null;
 }
 
@@ -1034,7 +1040,7 @@ function removeThinkTags(content) {
 // Add thinking system prompt for any model when thinking_budget is provided
 function addThinkingSystemPrompt(messages, thinkingBudget) {
   if (!thinkingBudget || thinkingBudget <= 0) return messages;
-  
+
   // Map thinking budget to qualitative guidance
   // This helps non-thinking models understand how much to think
   let thinkingGuidance = '';
@@ -1047,12 +1053,12 @@ function addThinkingSystemPrompt(messages, thinkingBudget) {
   } else {
     thinkingGuidance = 'Think extensively and comprehensively, considering all aspects in great detail (800+ words).';
   }
-  
+
   const thinkingInstruction = `IMPORTANT: You have extended thinking enabled. When solving problems or answering questions, show your reasoning process by wrapping your step-by-step thoughts in <think></think> tags before providing your final answer. ${thinkingGuidance}`;
-  
+
   // Check if there's already a system message
   const firstSystemIndex = messages.findIndex(m => m.role === 'system');
-  
+
   if (firstSystemIndex !== -1) {
     // Merge with existing system prompt
     const updatedMessages = [...messages];
@@ -1072,14 +1078,14 @@ function addThinkingSystemPrompt(messages, thinkingBudget) {
 
 function extractUsage(result) {
   const usage = result.usage;
-  
+
   // Puter/OpenRouter array format: [{type: "prompt", amount: X, cost: Y}, {type: "completion", ...}]
   if (Array.isArray(usage)) {
     const promptData = usage.find(u => u.type === 'prompt') || {};
     const completionData = usage.find(u => u.type === 'completion') || {};
-    return { 
-      prompt_tokens: promptData.amount || 0, 
-      completion_tokens: completionData.amount || 0, 
+    return {
+      prompt_tokens: promptData.amount || 0,
+      completion_tokens: completionData.amount || 0,
       total_tokens: (promptData.amount || 0) + (completionData.amount || 0),
       // Preserve cost data for logging (in Puter units: 1e8 = $1)
       prompt_cost: promptData.cost || 0,
@@ -1088,7 +1094,7 @@ function extractUsage(result) {
       _raw_usage: usage // Keep raw for debugging
     };
   }
-  
+
   // Claude driver format: {input_tokens, output_tokens}
   if (usage?.input_tokens !== undefined) {
     return {
@@ -1101,7 +1107,7 @@ function extractUsage(result) {
       total_cost: 0
     };
   }
-  
+
   // Standard OpenAI format
   if (usage?.prompt_tokens !== undefined) {
     return {
@@ -1113,7 +1119,7 @@ function extractUsage(result) {
       total_cost: 0
     };
   }
-  
+
   return { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, prompt_cost: 0, completion_cost: 0, total_cost: 0 };
 }
 
@@ -1143,16 +1149,16 @@ function puterToOpenAI(puterResult, model) {
 
   // Build the assistant message
   const message = { role: 'assistant', content: content || null };
-  
+
   // Add reasoning/thinking content if present (OpenAI-compatible extension)
   if (reasoning) {
     message.reasoning_content = reasoning;
   }
-  
+
   // Handle tool calls in response
-  const rawToolCalls = puterResult.message?.tool_calls || 
-                       puterResult.choices?.[0]?.message?.tool_calls ||
-                       puterResult.tool_calls;
+  const rawToolCalls = puterResult.message?.tool_calls ||
+    puterResult.choices?.[0]?.message?.tool_calls ||
+    puterResult.tool_calls;
   if (rawToolCalls && rawToolCalls.length > 0) {
     // Normalize tool_calls to OpenAI format (remove 'index' field, ensure proper structure)
     message.tool_calls = rawToolCalls.map((tc, idx) => ({
@@ -1160,8 +1166,8 @@ function puterToOpenAI(puterResult, model) {
       type: tc.type || 'function',
       function: {
         name: tc.function?.name || tc.name,
-        arguments: typeof tc.function?.arguments === 'string' 
-          ? tc.function.arguments 
+        arguments: typeof tc.function?.arguments === 'string'
+          ? tc.function.arguments
           : JSON.stringify(tc.function?.arguments || tc.arguments || {})
       }
     }));
@@ -1182,7 +1188,7 @@ function puterToOpenAI(puterResult, model) {
     }],
     usage: extractUsage(puterResult),
   };
-  
+
   return response;
 }
 
@@ -1190,20 +1196,20 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-Puter-Token');
-  
+
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: { message: 'Method not allowed' } });
 
   let user = null;
   let model = null;
-  
+
   // Check for direct Puter token - if provided, use it directly without our auth
   const puterToken = req.headers['x-puter-token'];
 
   try {
     const authHeader = req.headers.authorization || req.headers['x-api-key'] || '';
     const apiKey = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
-    
+
     // If Puter token is provided, we can skip our API key auth
     if (!apiKey && !puterToken) {
       return res.status(401).json({ error: { message: 'API key required' } });
@@ -1240,20 +1246,20 @@ export default async function handler(req, res) {
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: { message: 'messages array is required' } });
     }
-    
+
     // Check if any message contains multimodal content (images or files)
-    const hasImages = messages.some(msg => 
+    const hasImages = messages.some(msg =>
       Array.isArray(msg.content) && hasImageContent(msg.content)
     );
-    const hasFiles = messages.some(msg => 
+    const hasFiles = messages.some(msg =>
       Array.isArray(msg.content) && hasFileContent(msg.content)
     );
     const hasMultimodal = hasImages || hasFiles;
-    
+
     // Sanitize messages while preserving tool call structure, images, and files
     messages = messages.map(msg => {
       const sanitized = { role: msg.role || 'user' };
-      
+
       // Handle tool role messages (tool results)
       if (msg.role === 'tool') {
         // Tool messages must have non-empty content
@@ -1263,7 +1269,7 @@ export default async function handler(req, res) {
         if (msg.name) sanitized.name = msg.name;
         return sanitized;
       }
-      
+
       // Handle assistant messages with tool_calls
       if (msg.role === 'assistant' && msg.tool_calls) {
         sanitized.tool_calls = msg.tool_calls;
@@ -1272,14 +1278,14 @@ export default async function handler(req, res) {
         sanitized.content = normalizedContent === '' ? null : normalizedContent;
         return sanitized;
       }
-      
+
       // Handle system messages
       if (msg.role === 'system') {
         sanitized.content = normalizeContent(msg.content);
         if (msg.name) sanitized.name = msg.name;
         return sanitized;
       }
-      
+
       // Regular messages - normalize content, preserve multimodal content (images, files)
       // If content is array with images or files, preserve the multimodal format
       if (hasMultimodal && Array.isArray(msg.content) && (hasImageContent(msg.content) || hasFileContent(msg.content))) {
@@ -1287,10 +1293,10 @@ export default async function handler(req, res) {
       } else {
         sanitized.content = normalizeContent(msg.content);
       }
-      
+
       // Preserve name field if present
       if (msg.name) sanitized.name = msg.name;
-      
+
       return sanitized;
     }).filter(msg => {
       // Keep tool messages, assistant messages with tool_calls, or messages with content
@@ -1301,11 +1307,11 @@ export default async function handler(req, res) {
       if (Array.isArray(msg.content)) return msg.content.length > 0;
       return msg.content !== '';
     });
-    
+
     if (messages.length === 0) {
       return res.status(400).json({ error: { message: 'At least one message with content is required' } });
     }
-    
+
     // Add thinking system prompt when thinking_budget is provided
     if (thinking_budget && thinking_budget > 0) {
       messages = addThinkingSystemPrompt(messages, thinking_budget);
@@ -1318,56 +1324,173 @@ export default async function handler(req, res) {
 
     console.log(`Request from ${user.email}: ${model}, stream=${stream}`);
 
+    // Handle G4F models - route through G4F driver
+    if (isG4FModel(model)) {
+      console.log(`[G4F] Handling G4F model: ${model}`);
+
+      try {
+        if (stream) {
+          // Streaming G4F response
+          res.setHeader('Content-Type', 'text/event-stream');
+          res.setHeader('Cache-Control', 'no-cache');
+          res.setHeader('Connection', 'keep-alive');
+          res.flushHeaders();
+
+          const requestId = `g4f-${Date.now()}`;
+          let fullContent = '';
+          let hasError = false;
+          let errorMessage = '';
+
+          try {
+            await callG4FStream(messages, model, { temperature, max_tokens }, (chunk) => {
+              if (chunk.type === 'text' && chunk.text) {
+                fullContent += chunk.text;
+                const sseData = {
+                  id: requestId,
+                  object: 'chat.completion.chunk',
+                  created: Math.floor(Date.now() / 1000),
+                  model: model,
+                  choices: [{
+                    index: 0,
+                    delta: { content: chunk.text },
+                    finish_reason: null
+                  }]
+                };
+                res.write(`data: ${JSON.stringify(sseData)}\n\n`);
+              } else if (chunk.type === 'reasoning' && chunk.text) {
+                const sseData = {
+                  id: requestId,
+                  object: 'chat.completion.chunk',
+                  created: Math.floor(Date.now() / 1000),
+                  model: model,
+                  choices: [{
+                    index: 0,
+                    delta: { reasoning: chunk.text },
+                    finish_reason: null
+                  }]
+                };
+                res.write(`data: ${JSON.stringify(sseData)}\n\n`);
+              }
+            });
+          } catch (streamErr) {
+            hasError = true;
+            errorMessage = streamErr.message;
+            // Send error in SSE format
+            const errorData = {
+              id: requestId,
+              object: 'chat.completion.chunk',
+              created: Math.floor(Date.now() / 1000),
+              model: model,
+              choices: [{
+                index: 0,
+                delta: { content: `\n\n[Error: ${streamErr.message}]` },
+                finish_reason: 'error'
+              }]
+            };
+            res.write(`data: ${JSON.stringify(errorData)}\n\n`);
+          }
+
+          // Send final chunk
+          const finalChunk = {
+            id: requestId,
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: model,
+            choices: [{
+              index: 0,
+              delta: {},
+              finish_reason: hasError ? 'error' : 'stop'
+            }]
+          };
+          res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
+          res.write('data: [DONE]\n\n');
+          res.end();
+
+          // Log usage
+          if (user.id !== 'puter-direct') {
+            await logUsage(user.id, model, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }, 'g4f', !hasError, hasError ? errorMessage : null, null);
+          }
+
+          return;
+        } else {
+          // Non-streaming G4F response
+          const result = await callG4F(messages, model, { temperature, max_tokens });
+
+          // Log usage
+          if (user.id !== 'puter-direct') {
+            await logUsage(user.id, model, result.usage, 'g4f', true, null, null);
+          }
+
+          return res.json(result);
+        }
+      } catch (g4fError) {
+        console.error(`[G4F] Error: ${g4fError.message}`);
+
+        // Log failed usage
+        if (user.id !== 'puter-direct') {
+          await logUsage(user.id, model, null, 'g4f', false, g4fError.message);
+        }
+
+        // Only return JSON error if headers haven't been sent
+        if (!res.headersSent) {
+          return res.status(500).json({ error: { message: `G4F error: ${g4fError.message}` } });
+        }
+        // If headers are sent (streaming), just end the response
+        res.end();
+        return;
+      }
+    }
+
     // If Puter token provided, try using it directly first
     if (puterToken) {
       console.log(`[Puter Token] Direct token provided, attempting direct call for ${model}`);
       try {
         const requestOptions = { temperature, max_tokens, tools, tool_choice, thinking_budget };
-        
+
         if (stream) {
           // For streaming with Puter token, we need special handling for fallback
           return handleStreamWithTokenAndFallback(res, messages, model, puterToken, requestOptions, user, provider);
         }
-        
+
         const result = await callPuter(messages, model, puterToken, requestOptions);
         const openAIResponse = puterToOpenAI(result, model);
-        
+
         // Log usage only if we have a real user
         if (user.id !== 'puter-direct') {
           await logUsage(user.id, model, openAIResponse.usage, provider, true, null, 'puter-token');
         }
-        
+
         return res.json(openAIResponse);
       } catch (puterError) {
         console.error(`[Puter Token] Direct token failed: ${puterError.message}`);
         // Fall back to system keys for any error (invalid, rate limited, usage limited, etc.)
         console.log('[Puter Token] Falling back to system keys...');
-        
+
         // Get system keys for fallback
         let systemKeys = await getSystemKeys();
         if (systemKeys.length === 0 && process.env.PUTER_API_KEY) {
           systemKeys = [process.env.PUTER_API_KEY];
         }
-        
+
         if (systemKeys.length === 0) {
           return res.status(500).json({ error: { message: `Puter token error: ${puterError.message}. No system keys available for fallback.` } });
         }
-        
+
         // Try with system keys
         try {
           const requestOptions = { temperature, max_tokens, tools, tool_choice, thinking_budget };
-          
+
           if (stream) {
             return handleStream(res, messages, model, [], systemKeys, requestOptions, user, provider);
           }
-          
+
           const { result } = await callPuterWithRotation(messages, model, [], systemKeys, requestOptions);
           const openAIResponse = puterToOpenAI(result, model);
-          
+
           if (user.id !== 'puter-direct') {
             await logUsage(user.id, model, openAIResponse.usage, provider, true, null, 'system-fallback');
           }
-          
+
           return res.json(openAIResponse);
         } catch (fallbackError) {
           console.error(`[Puter Token Fallback] System keys also failed: ${fallbackError.message}`);
@@ -1377,18 +1500,18 @@ export default async function handler(req, res) {
     }
 
     const hasOwnKeys = user.puterKeys && user.puterKeys.length > 0;
-    
+
     if (!hasOwnKeys) {
       const dailyUsed = await getDailyUsage(user);
       if (dailyUsed >= FREE_DAILY_LIMIT) {
         await logUsage(user.id, model, null, provider, false, 'Daily limit exceeded');
-        return res.status(403).json({ 
-          error: { 
+        return res.status(403).json({
+          error: {
             message: `Daily free limit (${FREE_DAILY_LIMIT} requests) reached. Add your own Puter API key for unlimited access.`,
             code: 'DAILY_LIMIT_EXCEEDED',
             dailyUsed,
             dailyLimit: FREE_DAILY_LIMIT
-          } 
+          }
         });
       }
     }
@@ -1417,20 +1540,20 @@ export default async function handler(req, res) {
     // Non-streaming request with key rotation
     const { result, usedKey } = await callPuterWithRotation(messages, model, userKeys, systemKeys, requestOptions);
     const openAIResponse = puterToOpenAI(result, model);
-    
+
     // Log successful usage
     await logUsage(user.id, model, openAIResponse.usage, provider, true, null, hasOwnKeys ? usedKey : null);
-    
+
     return res.json(openAIResponse);
 
   } catch (error) {
     console.error('Chat error:', error);
-    
+
     // Log failed usage
     if (user && model) {
       await logUsage(user.id, model, null, getProvider(model), false, error.message);
     }
-    
+
     return res.status(500).json({ error: { message: error.message } });
   }
 }
@@ -1442,11 +1565,11 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
 
   const id = `chatcmpl-${Date.now()}`;
   const created = Math.floor(Date.now() / 1000);
-  
+
   // Get the keys to use - user keys take priority
   const hasUserKeys = userKeys && userKeys.length > 0;
   const allKeys = hasUserKeys ? [...userKeys] : [...(systemKeys || [])];
-  
+
   if (allKeys.length === 0) {
     res.write(`data: ${JSON.stringify({ error: { message: 'No API keys configured' } })}\n\n`);
     res.end();
@@ -1463,7 +1586,7 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
   let lastError = null;
   let usedKey = null;
   let success = false;
-  
+
   // Random start index for load distribution
   let startIndex = Math.floor(Math.random() * allKeys.length);
   const triedKeys = new Set();
@@ -1472,25 +1595,25 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
   for (let attempt = 0; attempt < allKeys.length && !success; attempt++) {
     const idx = (startIndex + attempt) % allKeys.length;
     usedKey = allKeys[idx];
-    
+
     // Skip if we already tried this key
     if (triedKeys.has(usedKey)) continue;
     triedKeys.add(usedKey);
-    
+
     // Skip only if key is in monthly blocked set (confirmed exhausted)
     const hash = keyPool.hashKey(usedKey);
     if (keyPool.monthlyBlockedHashes.has(hash)) {
       console.log(`[Stream Rotation] Skipping key index ${idx} - monthly blocked`);
       continue;
     }
-    
+
     // Skip if temp blocked (recent failure)
     const block = keyPool.blockedKeys.get(hash);
     if (block && Date.now() < block.until) {
       console.log(`[Stream Rotation] Skipping key index ${idx} - temp blocked`);
       continue;
     }
-    
+
     console.log(`[Stream Rotation] Attempt ${attempt + 1}/${allKeys.length}: Using key index ${idx}`);
 
     // Reset content for retry
@@ -1515,7 +1638,7 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
           // Combine any buffered partial tag with new text
           let text = tagBuffer + chunk.text;
           tagBuffer = '';
-          
+
           // Process text character by character for real-time streaming
           while (text.length > 0) {
             if (!insideThinkTag) {
@@ -1526,9 +1649,9 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
                 const beforeThink = text.substring(0, thinkStart);
                 if (beforeThink) {
                   totalContent += beforeThink;
-                  res.write(`data: ${JSON.stringify({ 
-                    id, object: 'chat.completion.chunk', created, model, 
-                    choices: [{ index: 0, delta: { content: beforeThink }, finish_reason: null }] 
+                  res.write(`data: ${JSON.stringify({
+                    id, object: 'chat.completion.chunk', created, model,
+                    choices: [{ index: 0, delta: { content: beforeThink }, finish_reason: null }]
                   })}\n\n`);
                 }
                 insideThinkTag = true;
@@ -1543,24 +1666,24 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
                     break;
                   }
                 }
-                
+
                 if (partialMatch) {
                   // Buffer the potential partial tag, send the rest
                   const toSend = text.substring(0, text.length - partialMatch.length);
                   if (toSend) {
                     totalContent += toSend;
-                    res.write(`data: ${JSON.stringify({ 
-                      id, object: 'chat.completion.chunk', created, model, 
-                      choices: [{ index: 0, delta: { content: toSend }, finish_reason: null }] 
+                    res.write(`data: ${JSON.stringify({
+                      id, object: 'chat.completion.chunk', created, model,
+                      choices: [{ index: 0, delta: { content: toSend }, finish_reason: null }]
                     })}\n\n`);
                   }
                   tagBuffer = partialMatch;
                 } else {
                   // No tag, send all text immediately
                   totalContent += text;
-                  res.write(`data: ${JSON.stringify({ 
-                    id, object: 'chat.completion.chunk', created, model, 
-                    choices: [{ index: 0, delta: { content: text }, finish_reason: null }] 
+                  res.write(`data: ${JSON.stringify({
+                    id, object: 'chat.completion.chunk', created, model,
+                    choices: [{ index: 0, delta: { content: text }, finish_reason: null }]
                   })}\n\n`);
                 }
                 text = '';
@@ -1573,9 +1696,9 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
                 const thinkContent = text.substring(0, thinkEnd);
                 if (thinkContent) {
                   totalReasoning += thinkContent;
-                  res.write(`data: ${JSON.stringify({ 
-                    id, object: 'chat.completion.chunk', created, model, 
-                    choices: [{ index: 0, delta: { reasoning_content: thinkContent }, finish_reason: null }] 
+                  res.write(`data: ${JSON.stringify({
+                    id, object: 'chat.completion.chunk', created, model,
+                    choices: [{ index: 0, delta: { reasoning_content: thinkContent }, finish_reason: null }]
                   })}\n\n`);
                 }
                 insideThinkTag = false;
@@ -1590,24 +1713,24 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
                     break;
                   }
                 }
-                
+
                 if (partialMatch) {
                   // Buffer the potential partial tag, stream the rest as reasoning immediately
                   const toSend = text.substring(0, text.length - partialMatch.length);
                   if (toSend) {
                     totalReasoning += toSend;
-                    res.write(`data: ${JSON.stringify({ 
-                      id, object: 'chat.completion.chunk', created, model, 
-                      choices: [{ index: 0, delta: { reasoning_content: toSend }, finish_reason: null }] 
+                    res.write(`data: ${JSON.stringify({
+                      id, object: 'chat.completion.chunk', created, model,
+                      choices: [{ index: 0, delta: { reasoning_content: toSend }, finish_reason: null }]
                     })}\n\n`);
                   }
                   tagBuffer = partialMatch;
                 } else {
                   // No closing tag yet, stream all as reasoning immediately
                   totalReasoning += text;
-                  res.write(`data: ${JSON.stringify({ 
-                    id, object: 'chat.completion.chunk', created, model, 
-                    choices: [{ index: 0, delta: { reasoning_content: text }, finish_reason: null }] 
+                  res.write(`data: ${JSON.stringify({
+                    id, object: 'chat.completion.chunk', created, model,
+                    choices: [{ index: 0, delta: { reasoning_content: text }, finish_reason: null }]
                   })}\n\n`);
                 }
                 text = '';
@@ -1616,9 +1739,9 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
           }
         } else if (chunk.type === 'reasoning' && chunk.text) {
           totalReasoning += chunk.text;
-          res.write(`data: ${JSON.stringify({ 
-            id, object: 'chat.completion.chunk', created, model, 
-            choices: [{ index: 0, delta: { reasoning_content: chunk.text }, finish_reason: null }] 
+          res.write(`data: ${JSON.stringify({
+            id, object: 'chat.completion.chunk', created, model,
+            choices: [{ index: 0, delta: { reasoning_content: chunk.text }, finish_reason: null }]
           })}\n\n`);
         } else if (chunk.type === 'tool_use') {
           // OpenAI streaming format for tool calls
@@ -1629,41 +1752,41 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
             function: { name: chunk.name, arguments: chunk.arguments }
           };
           toolCalls.push(toolCall);
-          
+
           // Send tool call chunk in OpenAI format
-          res.write(`data: ${JSON.stringify({ 
-            id, object: 'chat.completion.chunk', created, model, 
-            choices: [{ index: 0, delta: { tool_calls: [toolCall] }, finish_reason: null }] 
+          res.write(`data: ${JSON.stringify({
+            id, object: 'chat.completion.chunk', created, model,
+            choices: [{ index: 0, delta: { tool_calls: [toolCall] }, finish_reason: null }]
           })}\n\n`);
           toolCallIndex++;
         } else if (chunk.message?.content) {
           const content = removeThinkTags(chunk.message.content);
           totalContent = content;
-          res.write(`data: ${JSON.stringify({ 
-            id, object: 'chat.completion.chunk', created, model, 
-            choices: [{ index: 0, delta: { content }, finish_reason: null }] 
+          res.write(`data: ${JSON.stringify({
+            id, object: 'chat.completion.chunk', created, model,
+            choices: [{ index: 0, delta: { content }, finish_reason: null }]
           })}\n\n`);
         }
       });
-      
+
       success = true;
-      
+
       // Send final chunk with appropriate finish_reason
       const finishReason = toolCalls.length > 0 ? 'tool_calls' : 'stop';
-      res.write(`data: ${JSON.stringify({ 
-        id, object: 'chat.completion.chunk', created, model, 
+      res.write(`data: ${JSON.stringify({
+        id, object: 'chat.completion.chunk', created, model,
         choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
         usage: { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) }
       })}\n\n`);
       res.write('data: [DONE]\n\n');
       res.end();
-      
+
       // Log usage (approximate)
       await logUsage(user.id, model, { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) }, provider, true, null, hasUserKeys ? usedKey : null);
     } catch (error) {
       lastError = error;
       console.error(`[Stream] Key index failed:`, error.message);
-      
+
       if (isRateLimitError(error.message)) {
         markKeyFailed(usedKey);
         // If it's a usage-limited error, mark for the whole month
@@ -1682,12 +1805,12 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
     keyPool.blockedKeys.clear();
     keyPool.keyStatusCache.clear();
     keyPool.activeKeysPool.clear();
-    
+
     // Final attempt - try all keys again without any blocking
     for (let attempt = 0; attempt < allKeys.length && !success; attempt++) {
       const idx = (startIndex + attempt) % allKeys.length;
       usedKey = allKeys[idx];
-      
+
       console.log(`[Stream FINAL] Attempt ${attempt + 1}/${allKeys.length}: Using key index ${idx}`);
 
       // Reset content for retry
@@ -1709,7 +1832,7 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
           if (chunk.type === 'text' && chunk.text) {
             let text = tagBuffer + chunk.text;
             tagBuffer = '';
-            
+
             while (text.length > 0) {
               if (!insideThinkTag) {
                 const thinkStart = text.indexOf('<think>');
@@ -1753,14 +1876,14 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
             toolCallIndex++;
           }
         });
-        
+
         success = true;
-        
+
         const finishReason = toolCalls.length > 0 ? 'tool_calls' : 'stop';
         res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) } })}\n\n`);
         res.write('data: [DONE]\n\n');
         res.end();
-        
+
         await logUsage(user.id, model, { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) }, provider, true, null, hasUserKeys ? usedKey : null);
       } catch (error) {
         lastError = error;
@@ -1773,7 +1896,7 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
   if (!success) {
     // Log failed streaming usage
     await logUsage(user.id, model, null, provider, false, lastError?.message || 'All keys failed');
-    
+
     res.write(`data: ${JSON.stringify({ error: { message: lastError?.message || 'All API keys failed' } })}\n\n`);
     res.end();
   }
@@ -1787,7 +1910,7 @@ async function handleStreamWithToken(res, messages, model, puterToken, options =
 
   const id = `chatcmpl-${Date.now()}`;
   const created = Math.floor(Date.now() / 1000);
-  
+
   let totalContent = '';
   let totalReasoning = '';
   let toolCalls = [];
@@ -1804,7 +1927,7 @@ async function handleStreamWithToken(res, messages, model, puterToken, options =
       if (chunk.type === 'text' && chunk.text) {
         let text = tagBuffer + chunk.text;
         tagBuffer = '';
-        
+
         while (text.length > 0) {
           if (!insideThinkTag) {
             const thinkStart = text.indexOf('<think>');
@@ -1880,12 +2003,12 @@ async function handleStreamWithToken(res, messages, model, puterToken, options =
         res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`);
       }
     });
-    
+
     const finishReason = toolCalls.length > 0 ? 'tool_calls' : 'stop';
     res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) } })}\n\n`);
     res.write('data: [DONE]\n\n');
     res.end();
-    
+
     if (user.id !== 'puter-direct') {
       await logUsage(user.id, model, { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) }, provider, true, null, 'puter-token');
     }
@@ -1907,7 +2030,7 @@ async function handleStreamWithTokenAndFallback(res, messages, model, puterToken
 
   const id = `chatcmpl-${Date.now()}`;
   const created = Math.floor(Date.now() / 1000);
-  
+
   let totalContent = '';
   let totalReasoning = '';
   let toolCalls = [];
@@ -1926,7 +2049,7 @@ async function handleStreamWithTokenAndFallback(res, messages, model, puterToken
       if (chunk.type === 'text' && chunk.text) {
         let text = tagBuffer + chunk.text;
         tagBuffer = '';
-        
+
         while (text.length > 0) {
           if (!insideThinkTag) {
             const thinkStart = text.indexOf('<think>');
@@ -2002,25 +2125,25 @@ async function handleStreamWithTokenAndFallback(res, messages, model, puterToken
         res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`);
       }
     });
-    
+
     const finishReason = toolCalls.length > 0 ? 'tool_calls' : 'stop';
     res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) } })}\n\n`);
     res.write('data: [DONE]\n\n');
     res.end();
-    
+
     if (user.id !== 'puter-direct') {
       await logUsage(user.id, model, { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) }, provider, true, null, 'puter-token');
     }
   } catch (error) {
     console.error(`[Stream Puter Token] Failed:`, error.message);
     console.log('[Stream Puter Token] Attempting fallback to system keys...');
-    
+
     // Get system keys for fallback
     let systemKeys = await getSystemKeys();
     if (systemKeys.length === 0 && process.env.PUTER_API_KEY) {
       systemKeys = [process.env.PUTER_API_KEY];
     }
-    
+
     if (systemKeys.length === 0) {
       if (user.id !== 'puter-direct') {
         await logUsage(user.id, model, null, provider, false, error.message);
@@ -2033,7 +2156,7 @@ async function handleStreamWithTokenAndFallback(res, messages, model, puterToken
       res.end();
       return;
     }
-    
+
     // If stream already started with content, we can't cleanly fallback - just error
     if (totalContent.length > 0 || totalReasoning.length > 0) {
       if (user.id !== 'puter-direct') {
@@ -2043,40 +2166,40 @@ async function handleStreamWithTokenAndFallback(res, messages, model, puterToken
       res.end();
       return;
     }
-    
+
     // Fallback to system keys - use the regular handleStream which handles key rotation
     console.log('[Stream Puter Token] Falling back to system keys for streaming...');
-    
+
     // Note: We already sent the initial role chunk, so handleStream will handle the rest
     // We need to continue the stream, not start a new one
     await keyPool.loadMonthlyBlockedFromDB();
-    
+
     let fallbackSuccess = false;
     let lastFallbackError = null;
     let startIndex = 0;
-    
+
     for (let attempt = 0; attempt < systemKeys.length && !fallbackSuccess; attempt++) {
       const keyResult = await keyPool.getValidatedKey(systemKeys, startIndex);
       if (!keyResult) break;
-      
+
       const usedKey = keyResult.key;
       startIndex = keyResult.index + 1;
       console.log(`[Stream Fallback] Attempt ${attempt + 1}: Using system key index ${keyResult.index}`);
-      
+
       totalContent = '';
       totalReasoning = '';
       toolCalls = [];
       toolCallIndex = 0;
-      
+
       try {
         let insideThinkTag = false;
         let tagBuffer = '';
-        
+
         await callPuterStream(messages, model, usedKey, options, (chunk) => {
           if (chunk.type === 'text' && chunk.text) {
             let text = tagBuffer + chunk.text;
             tagBuffer = '';
-            
+
             while (text.length > 0) {
               if (!insideThinkTag) {
                 const thinkStart = text.indexOf('<think>');
@@ -2152,21 +2275,21 @@ async function handleStreamWithTokenAndFallback(res, messages, model, puterToken
             res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`);
           }
         });
-        
+
         fallbackSuccess = true;
-        
+
         const finishReason = toolCalls.length > 0 ? 'tool_calls' : 'stop';
         res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) } })}\n\n`);
         res.write('data: [DONE]\n\n');
         res.end();
-        
+
         if (user.id !== 'puter-direct') {
           await logUsage(user.id, model, { prompt_tokens: 0, completion_tokens: Math.ceil(totalContent.length / 4), total_tokens: Math.ceil(totalContent.length / 4) }, provider, true, null, 'system-fallback');
         }
       } catch (fallbackError) {
         lastFallbackError = fallbackError;
         console.error(`[Stream Fallback] Key failed:`, fallbackError.message);
-        
+
         if (isRateLimitError(fallbackError.message)) {
           markKeyFailed(usedKey);
           if (isUsageLimitedError(fallbackError.message)) {
@@ -2177,7 +2300,7 @@ async function handleStreamWithTokenAndFallback(res, messages, model, puterToken
         break;
       }
     }
-    
+
     if (!fallbackSuccess) {
       if (user.id !== 'puter-direct') {
         await logUsage(user.id, model, null, provider, false, lastFallbackError?.message || 'All fallback keys failed');
