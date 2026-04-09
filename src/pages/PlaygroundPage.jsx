@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
 
 export default function PlaygroundPage({ profile, models }) {
-  const openRouterModels = models.filter(m => m.id.startsWith('openrouter:'));
-  const defaultModel = openRouterModels.find(m => m.id === 'openrouter:openai/gpt-4o')?.id || openRouterModels[0]?.id || 'openrouter:openai/gpt-4o';
+  // Get all chat models, not just openrouter prefixed ones
+  const chatModels = models.filter(m => m.type === 'chat' || !m.type);
+  const defaultModel = chatModels.find(m => m.id === 'openrouter:openai/gpt-4o')?.id || chatModels[0]?.id || 'openrouter:openai/gpt-4o';
   
   const [model, setModel] = useState(defaultModel);
   const [message, setMessage] = useState('');
@@ -20,12 +21,20 @@ export default function PlaygroundPage({ profile, models }) {
       const parts = path.split('/');
       return parts.length > 1 ? `${parts[1]} (${parts[0]})` : path;
     }
+    if (id.startsWith('anthropic:')) {
+      const path = id.replace('anthropic:', '');
+      const parts = path.split('/');
+      return parts.length > 1 ? `${parts[1]} (${parts[0]})` : path;
+    }
+    if (id.startsWith('g4f:')) {
+      return id.replace('g4f:', '') + ' (g4f)';
+    }
     return id;
   };
 
-  const filteredModels = openRouterModels.filter(m => !filter || m.id.toLowerCase().includes(filter.toLowerCase()));
-  const popularIds = ['openrouter:openai/gpt-4o', 'openrouter:openai/gpt-4o-mini', 'openrouter:anthropic/claude-3.5-sonnet', 'openrouter:deepseek/deepseek-r1'];
-  const popularModels = openRouterModels.filter(m => popularIds.includes(m.id));
+  const filteredModels = chatModels.filter(m => !filter || m.id.toLowerCase().includes(filter.toLowerCase()));
+  const popularIds = ['openrouter:openai/gpt-4o', 'openrouter:openai/gpt-4o-mini', 'openrouter:anthropic/claude-3.5-sonnet', 'openrouter:deepseek/deepseek-r1', 'anthropic:anthropic/claude-3-7-sonnet'];
+  const popularModels = chatModels.filter(m => popularIds.includes(m.id));
   const otherModels = filteredModels.filter(m => !popularIds.includes(m.id));
 
   useEffect(() => {

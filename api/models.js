@@ -65,8 +65,8 @@ async function fetchPuterModels() {
     }
 
     const data = await response.json();
-    // Filter to only include OpenRouter chat/text models
-    modelsCache = (data.models || []).filter(isChatModel);
+    // Filter to only include OpenRouter chat/text models and driver-supported models
+    modelsCache = (data.models || []).filter(id => isChatModel(id) || id.startsWith('anthropic:'));
     cacheTime = Date.now();
     return modelsCache;
   } catch (error) {
@@ -77,15 +77,7 @@ async function fetchPuterModels() {
 
 // Fallback models if Puter API is unavailable
 function getDefaultModels() {
-  return [
-    'openrouter:openai/gpt-4o',
-    'openrouter:openai/gpt-4o-mini',
-    'openrouter:anthropic/claude-3.5-sonnet',
-    'openrouter:anthropic/claude-3-haiku',
-    'openrouter:google/gemini-2.0-flash-001',
-    'openrouter:deepseek/deepseek-chat',
-    'openrouter:meta-llama/llama-3.3-70b-instruct',
-  ];
+  return [];
 }
 
 function categorizeModel(modelId) {
@@ -103,7 +95,7 @@ function categorizeModel(modelId) {
     return { provider: 'openai', tier, via: 'direct' };
   }
 
-  if (modelId.startsWith('claude')) {
+  if (modelId.startsWith('claude') || modelId.startsWith('anthropic:')) {
     const tier = modelId.includes('opus') ? 'premium' : modelId.includes('haiku') ? 'economy' : 'standard';
     return { provider: 'anthropic', tier, via: 'direct' };
   }

@@ -431,6 +431,12 @@ function getDriverAndModel(modelId) {
     return { driver: 'openrouter', model: modelId };
   }
 
+  // Anthropic driver models from puter driver models list
+  if (modelId.startsWith('anthropic:')) {
+    // Keep exact ID as provided, use openrouter driver (Puter internally routes it)
+    return { driver: 'openrouter', model: modelId };
+  }
+
   // TogetherAI models
   if (modelId.startsWith('togetherai:')) {
     return { driver: 'together-ai', model: modelId };
