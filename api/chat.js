@@ -951,17 +951,19 @@ async function callPuterWithRotation(messages, modelId, userKeys, systemKeys, op
       console.error(`Key index ${idx} failed:`, error.message);
 
       if (error.isRateLimit || error.isUsageLimited || isRateLimitError(error.message)) {
-        // Short temp block - will retry after cooldown
         markKeyFailed(usedKey);
-
-        // Mark as monthly limited if it's a confirmed usage limit error
         if (error.isUsageLimited || isUsageLimitedError(error.message)) {
           await markKeyUsageLimited(usedKey);
         }
-        continue; // Try next key
       }
 
-      // For non-rate-limit errors, still try next key
+      // 401 auth errors mean ALL keys are dead — stop immediately
+      const errLower = (error.message || '').toLowerCase();
+      if (errLower.includes('401') || errLower.includes('authentication failed') || errLower.includes('token_auth_failed')) {
+        console.log('[Rotation] Auth failure detected — stopping rotation');
+        break;
+      }
+
       continue;
     }
   }
@@ -1801,12 +1803,19 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
 
       if (isRateLimitError(error.message)) {
         markKeyFailed(usedKey);
-        // If it's a usage-limited error, mark for the whole month
         if (isUsageLimitedError(error.message)) {
           await markKeyUsageLimited(usedKey);
         }
       }
-      // Continue to try next key for any error
+
+      // 401 auth errors mean ALL keys from this pool are dead — stop immediately
+      const errLower = (error.message || '').toLowerCase();
+      if (errLower.includes('401') || errLower.includes('authentication failed') || errLower.includes('token_auth_failed')) {
+        console.log('[Stream] Auth failure detected — all keys likely dead, stopping rotation');
+        break;
+      }
+
+      // Continue to try next key for other errors
       continue;
     }
   }
@@ -1818,8 +1827,12 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
     keyPool.keyStatusCache.clear();
     keyPool.activeKeysPool.clear();
 
+    // Final attempt - try ONE key only (if auth failed, no point trying all again)
+    const isAuthError = lastError && ((lastError.message || '').toLowerCase().includes('401') || (lastError.message || '').toLowerCase().includes('authentication failed') || (lastError.message || '').toLowerCase().includes('token_auth_failed'));
+    const finalAttempts = isAuthError ? 1 : allKeys.length;
+
     // Final attempt - try all keys again without any blocking
-    for (let attempt = 0; attempt < allKeys.length && !success; attempt++) {
+    for (let attempt = 0; attempt < finalAttempts && !success; attempt++) {
       const idx = (startIndex + attempt) % allKeys.length;
       usedKey = allKeys[idx];
 
