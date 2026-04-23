@@ -1568,6 +1568,7 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
 
   const id = `chatcmpl-${Date.now()}`;
   const created = Math.floor(Date.now() / 1000);
@@ -1913,6 +1914,7 @@ async function handleStreamWithToken(res, messages, model, puterToken, options =
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
 
   const id = `chatcmpl-${Date.now()}`;
   const created = Math.floor(Date.now() / 1000);
@@ -2033,6 +2035,7 @@ async function handleStreamWithTokenAndFallback(res, messages, model, puterToken
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
 
   const id = `chatcmpl-${Date.now()}`;
   const created = Math.floor(Date.now() / 1000);
