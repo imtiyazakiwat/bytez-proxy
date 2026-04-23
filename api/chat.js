@@ -957,11 +957,10 @@ async function callPuterWithRotation(messages, modelId, userKeys, systemKeys, op
         }
       }
 
-      // 401 auth errors mean ALL keys are dead — stop immediately
+      // Auth errors: mark key as dead but keep trying others
       const errLower = (error.message || '').toLowerCase();
       if (errLower.includes('401') || errLower.includes('authentication failed') || errLower.includes('token_auth_failed')) {
-        console.log('[Rotation] Auth failure detected — stopping rotation');
-        break;
+        await markKeyUsageLimited(usedKey);
       }
 
       continue;
@@ -1808,31 +1807,39 @@ async function handleStream(res, messages, model, userKeys, systemKeys, options 
         }
       }
 
-      // 401 auth errors mean ALL keys from this pool are dead — stop immediately
+      // Auth errors: mark key as monthly blocked (dead) but keep trying other keys
       const errLower = (error.message || '').toLowerCase();
       if (errLower.includes('401') || errLower.includes('authentication failed') || errLower.includes('token_auth_failed')) {
-        console.log('[Stream] Auth failure detected — all keys likely dead, stopping rotation');
-        break;
+        await markKeyUsageLimited(usedKey);
       }
 
-      // Continue to try next key for other errors
       continue;
     }
   }
 
-  // If all keys failed, clear caches and try one more full rotation
+  // If all keys failed, send error immediately (don't retry full rotation for auth errors)
   if (!success) {
+    const isAuthError = lastError && ((lastError.message || '').toLowerCase().includes('401') || (lastError.message || '').toLowerCase().includes('authentication failed') || (lastError.message || '').toLowerCase().includes('token_auth_failed'));
+
+    if (isAuthError) {
+      // All keys are dead for this model — don't waste time retrying
+      console.log('[Stream] All keys auth-failed, sending error');
+      res.write(`data: ${JSON.stringify({ error: { message: lastError.message } })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+      if (user?.id && user.id !== 'puter-direct') {
+        await logUsage(user.id, model, null, provider, false, lastError.message);
+      }
+      return;
+    }
+
     console.log('[Stream] All keys failed, clearing caches and retrying...');
     keyPool.blockedKeys.clear();
     keyPool.keyStatusCache.clear();
     keyPool.activeKeysPool.clear();
 
-    // Final attempt - try ONE key only (if auth failed, no point trying all again)
-    const isAuthError = lastError && ((lastError.message || '').toLowerCase().includes('401') || (lastError.message || '').toLowerCase().includes('authentication failed') || (lastError.message || '').toLowerCase().includes('token_auth_failed'));
-    const finalAttempts = isAuthError ? 1 : allKeys.length;
-
     // Final attempt - try all keys again without any blocking
-    for (let attempt = 0; attempt < finalAttempts && !success; attempt++) {
+    for (let attempt = 0; attempt < allKeys.length && !success; attempt++) {
       const idx = (startIndex + attempt) % allKeys.length;
       usedKey = allKeys[idx];
 
