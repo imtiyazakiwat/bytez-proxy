@@ -594,7 +594,7 @@ async function logUsage(userId, model, usage, provider, success, errorMessage = 
   }
 }
 
-// Check if error is a rate limit / usage limit error
+// Check if error is a rate limit / usage limit / auth error
 function isRateLimitError(error) {
   const errorMsg = (error?.message || error || '').toLowerCase();
   return errorMsg.includes('rate limit') ||
@@ -604,15 +604,20 @@ function isRateLimitError(error) {
     errorMsg.includes('exceeded') ||
     errorMsg.includes('too many requests') ||
     errorMsg.includes('permission denied') ||
+    errorMsg.includes('authentication failed') ||
+    errorMsg.includes('token_auth_failed') ||
+    errorMsg.includes('401') ||
     errorMsg.includes('429');
 }
 
-// Check if error is specifically a usage limit (should be blocked for the month)
+// Check if error is specifically a usage limit or dead key (should be blocked for the month)
 function isUsageLimitedError(errorMsg) {
   const msg = (errorMsg || '').toLowerCase();
   return msg.includes('usage-limited') ||
     msg.includes('usage limit') ||
-    msg.includes('permission denied');
+    msg.includes('permission denied') ||
+    msg.includes('authentication failed') ||
+    msg.includes('token_auth_failed');
 }
 
 // Models that support extended thinking with :thinking variant on Puter/OpenRouter
