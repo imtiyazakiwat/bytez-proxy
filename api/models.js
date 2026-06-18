@@ -30,12 +30,7 @@ function isChatModel(modelId) {
     return true;
   }
 
-  // Only include openrouter: models for reliability
-  if (!modelId.startsWith('openrouter:')) {
-    return false;
-  }
-
-  // Exclude models matching non-chat patterns
+  // Exclude models matching non-chat patterns (applies to all prefixes)
   for (const pattern of NON_CHAT_MODEL_PATTERNS) {
     if (pattern.test(modelId)) {
       return false;
@@ -66,7 +61,7 @@ async function fetchPuterModels() {
 
     const data = await response.json();
     // Filter to only include OpenRouter chat/text models and driver-supported models
-    modelsCache = (data.models || []).filter(id => isChatModel(id) || id.startsWith('anthropic:'));
+    modelsCache = (data.models || []).filter(id => isChatModel(id));
     cacheTime = Date.now();
     return modelsCache;
   } catch (error) {
