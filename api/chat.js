@@ -426,15 +426,20 @@ function getDriverAndModel(modelId) {
     return { driver: 'g4f', model: modelId };
   }
 
-  // Already prefixed with openrouter: - use as-is
+  // Puter consolidated all chat providers into a single 'ai-chat' driver.
+  // The old per-provider drivers (openrouter, anthropic, etc.) were removed and
+  // now return "Driver not found". The model IDs themselves (incl. 'openrouter:'
+  // and 'anthropic:' prefixes) are still valid aliases in the ai-chat catalog,
+  // so we keep the model string and only swap the driver name.
+
+  // Already prefixed with openrouter: - keep ID, use ai-chat driver
   if (modelId.startsWith('openrouter:')) {
-    return { driver: 'openrouter', model: modelId };
+    return { driver: 'ai-chat', model: modelId };
   }
 
-  // Anthropic driver models from puter driver models list
+  // Anthropic models - keep ID, use ai-chat driver
   if (modelId.startsWith('anthropic:')) {
-    // Keep exact ID as provided, use openrouter driver (Puter internally routes it)
-    return { driver: 'openrouter', model: modelId };
+    return { driver: 'ai-chat', model: modelId };
   }
 
   // TogetherAI models
@@ -442,35 +447,12 @@ function getDriverAndModel(modelId) {
     return { driver: 'together-ai', model: modelId };
   }
 
-  // Check if we have a known mapping for this model
-  const openRouterModel = OPENROUTER_MODEL_MAP[modelId];
-  if (openRouterModel) {
-    return { driver: 'openrouter', model: `openrouter:${openRouterModel}` };
-  }
-
-  // For unknown models, try to route through OpenRouter with smart prefix detection
-  // This handles models from the Puter models list that aren't in our map
-  if (modelId.startsWith('gpt-') || modelId.startsWith('o1') || modelId.startsWith('o3') || modelId.startsWith('o4')) {
-    return { driver: 'openrouter', model: `openrouter:openai/${modelId}` };
-  }
-  if (modelId.startsWith('claude')) {
-    return { driver: 'openrouter', model: `openrouter:anthropic/${modelId}` };
-  }
-  if (modelId.startsWith('gemini')) {
-    return { driver: 'openrouter', model: `openrouter:google/${modelId}` };
-  }
-  if (modelId.startsWith('grok')) {
-    return { driver: 'openrouter', model: `openrouter:x-ai/${modelId}` };
-  }
-  if (modelId.startsWith('mistral')) {
-    return { driver: 'openrouter', model: `openrouter:mistralai/${modelId}` };
-  }
-  if (modelId.startsWith('deepseek')) {
-    return { driver: 'openrouter', model: `openrouter:deepseek/${modelId}` };
-  }
-
-  // Default: try OpenRouter with the model ID as-is (it may fail but gives better error)
-  return { driver: 'openrouter', model: `openrouter:${modelId}` };
+  // The ai-chat catalog accepts bare aliases directly (e.g. 'gpt-5.4',
+  // 'claude-opus-4-7', 'gemini-2.5-flash', 'grok-4.3'), so for everything else
+  // we pass the model ID through unchanged and let ai-chat resolve it. This is
+  // more robust than guessing an 'openrouter:provider/...' prefix, which no longer
+  // resolves for several providers (notably OpenAI gpt-5.x).
+  return { driver: 'ai-chat', model: modelId };
 }
 
 async function getUserByApiKey(apiKey) {

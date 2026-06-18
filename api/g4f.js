@@ -10,7 +10,8 @@ import crypto from 'crypto';
 // Known G4F backend hosts to probe for discovery
 // The Cloudflare tunnel URL changes periodically, so we try multiple options
 const KNOWN_HOSTS = [
-    'https://dna-subjects-billing-scuba.trycloudflare.com', // Current known working tunnel
+    'https://g4f.space',      // Current host (per g4f.dev framework G4F_HOST_PASS)
+    'https://pass.g4f.space', // Legacy host (kept as fallback)
     'https://g4f.cloud',
     'https://api.g4f.cloud',
 ];
@@ -100,7 +101,9 @@ async function discoverBackendUrl() {
             // Look for G4F_HOST_PASS or similar patterns
             const hostMatch = text.match(/G4F_HOST_PASS\s*[=:]\s*["']([^"']+)["']/);
             if (hostMatch && hostMatch[1]) {
-                const discoveredUrl = `https://${hostMatch[1]}`;
+                // Handle case where the host already includes https://
+                const host = hostMatch[1];
+                const discoveredUrl = host.startsWith('https://') ? host : `https://${host}`;
                 console.log(`[G4F] Found host in framework: ${discoveredUrl}`);
                 // Verify it works
                 const testRes = await fetchWithTimeout(`${discoveredUrl}/backend-api/v2/public-key`, {

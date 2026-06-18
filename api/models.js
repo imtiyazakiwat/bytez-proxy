@@ -50,7 +50,7 @@ async function fetchPuterModels() {
   }
 
   try {
-    const response = await fetch('https://puter.com/puterai/chat/models', {
+    const response = await fetch('https://api.puter.com/puterai/chat/models', {
       headers: {
         'Accept': 'application/json',
         'User-Agent': 'UnifiedAI/1.0',
@@ -121,7 +121,7 @@ async function fetchImageModels() {
   }
 
   try {
-    const response = await fetch('https://puter.com/puterai/chat/models', {
+    const response = await fetch('https://api.puter.com/puterai/chat/models', {
       headers: {
         'Accept': 'application/json',
         'User-Agent': 'UnifiedAI/1.0',
